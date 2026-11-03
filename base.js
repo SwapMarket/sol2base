@@ -162,6 +162,11 @@ async function sendWatched({ account, send, check, label, setStatus }) {
   return receipt;
 }
 
+async function waitBlocks(n) {
+  const start = await baseClient.getBlockNumber();
+  while ((await baseClient.getBlockNumber()) < start + BigInt(n)) await sleep(1000);
+}
+
 // ---------- swap ----------
 
 // Swap `amountIn` USDC (capped at the signer's balance) to EURC for `to`, with the optional gas top-up
@@ -184,6 +189,9 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
       send: () => wallet.writeContract({ account, address: USDC_BASE, abi: erc20Abi, functionName: 'approve', args: [AERO_ROUTER, amountIn] }),
       check: async () => (await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER] })) >= amountIn,
     });
+    // Give the wallet's own node time to see the approval: wallets simulate the swap before showing it,
+    // and one that is a block behind reports it "will fail".
+    await waitBlocks(2);
   }
 
   // With the top-up, part of the USDC is swapped to WETH (kept in the router) and unwrapped to the
