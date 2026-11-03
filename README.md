@@ -21,6 +21,8 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
    (`base.js`, ported from eth2base) and sends the EURC to the recipient (the Base wallet by default). Optional gas top-up: 0.20 USDC
    swapped to ETH for the Base wallet in the same transaction, pre-ticked when its ETH covers fewer than 4 swaps. EURC is disabled when
    the Base wallet can't pay the swap gas at the current price.
+   **Swap all Base USDC to EURC**: a button under the Base balances swaps the Base wallet's whole USDC balance (e.g. left from
+   earlier USDC transfers) the same way, to the recipient or the Base wallet.
 
 **SOL needed**: about 0.003 SOL, mostly rent for the account where CCTP records the message (reclaimable from Circle's program after
 5 days), plus network fees; paying with USDT adds the swap fee and, if missing, a USDC token account (~0.002 SOL).

@@ -119,6 +119,7 @@ button.ghost { background: transparent; }
 #manualMint, #retrySwap { margin-top: 12px; }
 .base-wallet { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 #baseBalances { margin-top: 8px; font-size: 14px; }
+.sweep { margin-top: 8px; }
 .receive { margin: 14px 0 0; font-size: 14px; font-weight: 600; }
 .receive:empty { display: none; }
 .warn { margin: 8px 0 0; font-size: 14px; color: var(--err); }

@@ -146,6 +146,7 @@ setInterval(tickSteps, 1000);
 function resetSteps() {
   for (const li of document.querySelectorAll('#steps li')) {
     li.className = '';
+    li.hidden = false;
     li.querySelector('.elapsed')?.remove();
   }
   document.querySelector('#steps li[data-step="swapIn"]').hidden = currentSrc() !== 'USDT';
@@ -245,6 +246,8 @@ function refreshForm() {
   const eurcOk = !!evm && (!baseBal || baseBal.eth >= swapGas);
   const topUpOk = !!baseBal && baseBal.eth >= (B.GAS_UNITS.swap + B.GAS_UNITS.topUp) * baseBal.gasPrice;
   eurcRadio.disabled = !eurcOk;
+  $('sweep').hidden = !evm || !baseBal?.usdc;
+  $('sweep').disabled = !eurcOk;
   if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
   $('eurcHint').textContent = !evm ? '· needs a connected Base wallet with a little ETH for gas'
     : eurcOk ? '· needs a little ETH on Base for gas'
@@ -494,6 +497,7 @@ async function refreshBaseBalances() {
     $('balBaseUsdc').textContent = fmt(baseBal.usdc);
     $('balEurc').textContent = fmt(baseBal.eurc);
     $('gasBase').textContent = fmtEth(baseBal.eth);
+    $('sweep').textContent = `Swap all ${fmt(baseBal.usdc)} Base USDC to EURC`;
     topUpEth = (await B.quoteTopUp()).amountOut;
   } catch (e) {
     console.warn('base balances', e);
@@ -763,6 +767,33 @@ async function swapToEurc() {
   }
 }
 
+// Swap the Base wallet's whole USDC balance to EURC (e.g. USDC left from earlier transfers).
+async function sweep() {
+  if (!evm || busy) return;
+  busy = true;
+  $('sweep').disabled = true;
+  resetSteps();
+  for (const li of document.querySelectorAll('#steps li')) li.hidden = li.dataset.step !== 'swap';
+  setStep('swap', 'active');
+  try {
+    const { usdc } = await B.baseBalances(evm.address);
+    if (!usdc) throw new Error('No USDC on Base to swap.');
+    const to = recipient() ?? evm.address;
+    const topUp = !$('topUp').disabled && $('topUp').checked;
+    const r = await B.swapToEurc({ signer: evm, amountIn: usdc, to, topUp, setStatus, inWallet: inBaseWallet });
+    setStep('swap', 'done');
+    const dest = to === evm.address ? '' : ` for ${short(to)}`;
+    const gasDone = r.ethOut ? `, plus ${fmtEth(r.ethOut)} ETH for gas from ${fmt(r.topUp)} USDC` : '';
+    setStatus(`Done! Swapped ${fmt(r.amountIn - r.topUp)} USDC to ${fmt(r.eurcOut)} EURC${dest}${gasDone} on Aerodrome ${baseTx(r.hash)}. Rate: EUR/USD ${eurUsd(r.amountIn - r.topUp, r.eurcOut)}.`, 'ok');
+  } catch (e) {
+    console.error(e);
+    setStatus(`Swap failed: ${explain(e)} Your USDC is safe on Base.`, 'err');
+  } finally {
+    busy = false;
+    refreshBaseBalances();
+  }
+}
+
 // ---------- persistence ----------
 
 function savePending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch {} }
@@ -792,6 +823,7 @@ $('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
 $('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(e)));
 $('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
 $('retrySwap').onclick = swapToEurc;
+$('sweep').onclick = sweep;
 $('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
