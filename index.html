@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sol2base — USDT/USDC Solana → Base via CCTP</title>
+  <link rel="icon" type="image/png" href="icon.png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="style.css?v=__COMMIT__">
+  <script type="importmap">{ "imports": { "solana": "./solana.js?v=__COMMIT__" } }</script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>sol2base</h1>
+      <p class="sub">Move USDC or USDT from Solana to Base with Circle's CCTP V2. You sign on Solana, then Circle mints USDC on Base and takes its fee out of the amount. You need a little SOL, and no ETH on Base.</p>
+    </header>
+
+    <section class="card">
+      <div class="row between">
+        <span id="account" class="muted">Not connected</span>
+        <button id="connect">Connect Solana wallet</button>
+      </div>
+      <p id="noWallet" class="muted wallet-help" hidden>
+        No Solana wallet found. Install Phantom, Solflare or Backpack, or on a phone open this page in the wallet app:
+        <a id="openPhantom" href="#">Phantom</a> · <a id="openSolflare" href="#">Solflare</a>
+      </p>
+      <div id="balances" hidden>
+        <div class="bal"><span class="chain">Solana</span><span class="vals"><span><b id="balUsdc">–</b> USDC</span><span><b id="balUsdt">–</b> USDT</span><span><b id="balSol">–</b> SOL</span></span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <fieldset class="src">
+        <legend>Pay with</legend>
+        <label class="radio"><input type="radio" name="src" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="src" value="USDT"> USDT, swapped to USDC first <span class="muted">· Jupiter</span></label>
+      </fieldset>
+
+      <label for="amount" id="amountLabel">Amount (USDC)</label>
+      <div class="row">
+        <input id="amount" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
+        <button id="max" class="ghost" type="button">Max</button>
+      </div>
+
+      <label for="recipient">Recipient on Base</label>
+      <input id="recipient" type="text" placeholder="0x… your Base (EVM) address" autocomplete="off" spellcheck="false">
+
+      <fieldset>
+        <legend>Speed</legend>
+        <label class="radio"><input type="radio" name="mode" value="standard" checked> Standard (about half a minute on Solana) <span class="muted" id="feeStd"></span></label>
+        <label class="radio"><input type="radio" name="mode" value="fast"> Fast (a few seconds) <span class="muted" id="feeFast"></span></label>
+      </fieldset>
+
+      <p id="receive" class="receive"></p>
+      <p id="solWarn" class="warn"></p>
+      <button id="bridge" class="primary" disabled>Bridge to Base</button>
+    </section>
+
+    <section class="card" id="progress" hidden>
+      <ol id="steps">
+        <li data-step="swapIn" hidden>Swap USDT to USDC</li>
+        <li data-step="burn">Burn USDC on Solana</li>
+        <li data-step="attest">Wait for Circle attestation</li>
+        <li data-step="mint">Circle mints on Base</li>
+      </ol>
+      <div id="status" class="status"></div>
+    </section>
+
+    <details class="card">
+      <summary>Resume a transfer</summary>
+      <p class="muted">Closed the page mid-transfer? Paste the Solana burn transaction signature to check on it.</p>
+      <div class="row">
+        <input id="resumeSig" type="text" placeholder="burn transaction signature" spellcheck="false">
+        <button id="resume">Resume</button>
+      </div>
+    </details>
+
+    <footer class="muted">
+      Circle CCTP V2 on Solana: TokenMessengerMinterV2 <code>CCTPV2vP…UMQe</code>. Swaps via Jupiter. Attestations and the Base mint come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
+      Use at your own risk. <a id="commit" href="https://github.com/SwapMarket/sol2base/tree/__COMMIT__" target="_blank" rel="noopener" title="Source code at the deployed commit">__COMMIT_SHORT__</a>
+    </footer>
+  </main>
+  <script type="module" src="app.js?v=__COMMIT__"></script>
+</body>
+</html>
