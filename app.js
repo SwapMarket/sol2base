@@ -385,7 +385,9 @@ async function connectWalletConnect() {
   ]);
   const client = await SignClient.init({
     projectId: WALLETCONNECT_PROJECT_ID,
-    metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: location.origin, icons: [new URL('icon.png', location.href).href] },
+    // The page's own URL (not just the origin, which is a different site with its own favicon), so wallets
+    // that look up the site's icon find this one.
+    metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: new URL('.', location.href).href, icons: [new URL('icon.png', location.href).href] },
   });
   const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
   const { uri, approval } = await client.connect({
