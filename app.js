@@ -19,6 +19,11 @@ const RECIPIENT_KEY = 'sol2base:recipient';
 const BURNS_KEY = 'sol2base:burns';
 const FORM_KEY = 'sol2base:form'; // the form's choices, restored on reload
 const BASE_WALLET_KEY = 'sol2base:baseWallet'; // 'injected' when an extension Base wallet was connected
+// Set while a WalletConnect session is in use. WalletConnect keeps the session itself in IndexedDB, so
+// this tells the page to load WalletConnect on start and restore it.
+// (Its name must not contain "walletconnect", "wc@", "wc_" or "wallet_connect": WalletConnect moves such
+// localStorage keys into its IndexedDB and deletes them.)
+const WC_KEY = 'sol2base:qrSession';
 // Public Solana RPCs that answer browser requests; the first one that works is used.
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 // Reown (WalletConnect) project, shared with eth2base; Solana mainnet's CAIP-2 chain id.
@@ -408,7 +413,11 @@ async function wcInit() {
     // that look up the site's icon find this one.
     metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: new URL('.', location.href).href, icons: [new URL('icon.png', location.href).href] },
   });
-  wcClient.on('session_delete', () => { setOwner(null); setEvm(null); });
+  wcClient.on('session_delete', () => {
+    try { localStorage.removeItem(WC_KEY); } catch {}
+    setOwner(null);
+    setEvm(null);
+  });
   return wcClient;
 }
 
@@ -419,10 +428,13 @@ const wcStoredSession = (client) => client.session.getAll()
 
 // On load: reuse a stored session without showing a QR code.
 async function restoreWalletConnect() {
-  if (!Object.keys(localStorage).some((k) => k.startsWith('wc@2:client'))) return false;
+  if (!localStorage.getItem(WC_KEY)) return false;
   const client = await wcInit();
   const session = wcStoredSession(client);
-  if (!session) return false;
+  if (!session) {
+    try { localStorage.removeItem(WC_KEY); } catch {} // expired or ended in the wallet
+    return false;
+  }
   useWalletConnectSession(client, session);
   return true;
 }
@@ -450,6 +462,7 @@ async function connectWalletConnect() {
 }
 
 function useWalletConnectSession(client, session) {
+  try { localStorage.setItem(WC_KEY, '1'); } catch {}
   const address = session.namespaces.solana.accounts[0].split(':')[2];
   const pk = new S.PublicKey(address);
   wallet = {
