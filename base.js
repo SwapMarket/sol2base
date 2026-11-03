@@ -198,7 +198,8 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
   // signer as ETH, all in one multicall with the EURC swap.
   const topUp = withTopUp && amountIn > 2n * TOPUP_USDC ? TOPUP_USDC : 0n;
   const [{ amountOut, tickSpacing }, eth] = await Promise.all([quoteEurc(amountIn - topUp), topUp ? quoteTopUp() : null]);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 20 * 60);
+  // Deadline from Base's own clock, not the computer's (which may be off).
+  const deadline = (await baseClient.getBlock()).timestamp + 20n * 60n;
   const eurcSwap = {
     tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: to,
     deadline, amountIn: amountIn - topUp, amountOutMinimum: minOut(amountOut), sqrtPriceLimitX96: 0n,
