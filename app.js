@@ -13,6 +13,10 @@ const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC
 const LAMPORTS = { eventRent: 2_990_000n, fees: 100_000n, swap: 600_000n, usdcAccount: 2_040_000n };
 const PENDING_KEY = 'sol2base:pendingBurn';
 const RECIPIENT_KEY = 'sol2base:recipient';
+// Burns made from this browser (or found in recent history), per Solana owner: { [owner]: [{ sig, event }] }.
+// The public RPCs can't search old history or list accounts by owner, so the page remembers them to
+// reclaim the message-account rent after 5 days.
+const BURNS_KEY = 'sol2base:burns';
 // Public Solana RPCs that answer browser requests; the first one that works is used.
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 // Reown (WalletConnect) project, shared with eth2base; Solana mainnet's CAIP-2 chain id.
@@ -452,6 +456,8 @@ function setOwner(pk) {
   $('balances').hidden = !owner;
   $('noWallet').hidden = true;
   refreshBalances();
+  if (owner) discoverBurns().then(refreshRent).catch((e) => console.warn('burn history', e));
+  else $('rentRow').hidden = true;
 }
 
 async function refreshBalances() {
@@ -645,6 +651,7 @@ async function bridge() {
     if (sim.value.err) throw new Error(`The burn would fail: ${JSON.stringify(sim.value.err)}`);
     setStatus(`Confirm the burn of ${fmt(amount)} USDC ${inWallet()}…`);
     const sig = await signAndSend(tx, lastValidBlockHeight, 'Burn', [eventKeypair]);
+    rememberBurn(owner.toBase58(), sig, eventKeypair.publicKey.toBase58());
     unburned = null;
     savePending({ sig, out, eurcTo, topUp });
     setStep('burn', 'done');
@@ -794,6 +801,98 @@ async function sweep() {
   }
 }
 
+// ---------- message-account rent ----------
+
+function loadBurns() { try { return JSON.parse(localStorage.getItem(BURNS_KEY) ?? '{}'); } catch { return {}; } }
+function saveBurns(b) { try { localStorage.setItem(BURNS_KEY, JSON.stringify(b)); } catch {} }
+function rememberBurn(ownerAddr, sig, event) {
+  const b = loadBurns();
+  const list = b[ownerAddr] ?? [];
+  if (!list.some((x) => x.sig === sig)) list.push({ sig, event });
+  b[ownerAddr] = list;
+  saveBurns(b);
+}
+
+// Find CCTP burns in the owner's recent history (within what the public RPC keeps): the message
+// account is the transaction's second signer.
+async function discoverBurns() {
+  const me = owner.toBase58();
+  const known = new Set((loadBurns()[me] ?? []).map((x) => x.sig));
+  const sigs = await rpc('getSignaturesForAddress', [me, { limit: 40 }]);
+  for (const { signature, err } of sigs) {
+    if (err || known.has(signature)) continue;
+    let tx;
+    try { tx = await rpc('getTransaction', [signature, { encoding: 'json', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]); } catch { continue; }
+    const keys = tx?.transaction.message.accountKeys ?? [];
+    const isBurn = tx?.transaction.message.instructions.some((i) => keys[i.programIdIndex] === S.TOKEN_MESSENGER_MINTER_PROGRAM.toBase58());
+    if (isBurn && tx.transaction.message.header.numRequiredSignatures >= 2 && keys[0] === me) rememberBurn(me, signature, keys[1]);
+  }
+}
+
+let reclaimable = []; // [{ sig, event, lamports }] whose 5-day window has passed
+async function refreshRent() {
+  if (!owner) return;
+  const me = owner.toBase58();
+  const list = loadBurns()[me] ?? [];
+  if (!list.length) { $('rentRow').hidden = true; return; }
+  const { value: accts } = await rpc('getMultipleAccounts', [list.map((x) => x.event), { encoding: 'base64', commitment: 'confirmed' }]);
+  const now = Date.now() / 1000;
+  const open = [];
+  reclaimable = [];
+  let pendingLamports = 0n, nextAt = Infinity;
+  list.forEach((x, i) => {
+    const a = accts[i];
+    if (!a || a.owner !== S.MESSAGE_TRANSMITTER_PROGRAM.toBase58()) return; // already reclaimed
+    open.push(x);
+    const { rentPayer, createdAt } = S.parseEventAccount(Uint8Array.from(atob(a.data[0]), (c) => c.charCodeAt(0)));
+    if (rentPayer.toBase58() !== me) return;
+    const at = createdAt + S.EVENT_ACCOUNT_WINDOW_SECONDS;
+    if (now >= at) reclaimable.push({ ...x, lamports: BigInt(a.lamports) });
+    else { pendingLamports += BigInt(a.lamports); nextAt = Math.min(nextAt, at); }
+  });
+  // Forget accounts that no longer exist.
+  const b = loadBurns(); b[me] = open; saveBurns(b);
+  const ready = reclaimable.reduce((s, x) => s + x.lamports, 0n);
+  const parts = [];
+  if (ready) parts.push(`${fmtSol(ready)} SOL message-account rent reclaimable (${reclaimable.length} transfer${reclaimable.length > 1 ? 's' : ''})`);
+  if (pendingLamports) parts.push(`${fmtSol(pendingLamports)} SOL reclaimable from ${new Date(nextAt * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`);
+  $('rentText').textContent = parts.join('; ');
+  $('rentRow').hidden = !parts.length;
+  $('reclaim').hidden = !ready;
+}
+
+// Close the eligible message accounts, one transaction each, returning their rent to the owner.
+async function reclaim() {
+  if (busy || !reclaimable.length) return;
+  busy = true;
+  $('reclaim').disabled = true;
+  resetSteps();
+  for (const li of document.querySelectorAll('#steps li')) li.hidden = true;
+  let done = 0n;
+  try {
+    for (const x of reclaimable) {
+      const m = (await (await fetch(`${IRIS}/v2/messages/${S.DOMAIN_SOLANA}?transactionHash=${x.sig}`)).json()).messages?.[0];
+      if (!m?.attestation || m.attestation === 'PENDING') throw new Error(`Circle has no attestation for ${short(x.sig)} yet.`);
+      const { value: { blockhash, lastValidBlockHeight } } = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+      const tx = S.buildReclaimTx({ owner, eventAccount: new S.PublicKey(x.event), attestation: m.attestation, message: m.message, blockhash });
+      const sim = await rpc('simulateTransaction', [b64(tx.serialize()), { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true }]);
+      if (sim.value.err) throw new Error(`Reclaiming ${short(x.sig)} would fail: ${JSON.stringify(sim.value.err)}`);
+      setStatus(`Confirm reclaiming ${fmtSol(x.lamports)} SOL ${inWallet()}…`);
+      await signAndSend(tx, lastValidBlockHeight, 'Reclaim');
+      done += x.lamports;
+    }
+    setStatus(`Done! Reclaimed ${fmtSol(done)} SOL of message-account rent.`, 'ok');
+  } catch (e) {
+    console.error(e);
+    setStatus(`${done ? `Reclaimed ${fmtSol(done)} SOL so far. ` : ''}${explain(e)}`, 'err');
+  } finally {
+    busy = false;
+    $('reclaim').disabled = false;
+    refreshBalances();
+    refreshRent();
+  }
+}
+
 // ---------- persistence ----------
 
 function savePending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch {} }
@@ -824,6 +923,7 @@ $('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(
 $('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
 $('retrySwap').onclick = swapToEurc;
 $('sweep').onclick = sweep;
+$('reclaim').onclick = reclaim;
 $('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
@@ -848,6 +948,6 @@ if ($('commit').textContent.startsWith('__')) {
 
 loadSaved();
 loadFees();
-setInterval(() => { loadFees(); refreshBalances(); refreshBaseBalances(); }, 30_000);
+setInterval(() => { loadFees(); refreshBalances(); refreshBaseBalances(); refreshRent().catch(() => {}); }, 30_000);
 // Wallets that remember this site connect without a prompt (after standard wallets have registered).
 setTimeout(() => connect(true).catch(() => {}), 300);

@@ -99,6 +99,44 @@ export function buildBurnTx({ owner, amount, mintRecipient, maxFee, minFinalityT
   return { tx: new VersionedTransaction(message), eventKeypair: eventAccount };
 }
 
+// ---------- reclaiming the MessageSent account rent ----------
+
+// MessageTransmitterV2.reclaim_event_account, from Circle's IDL. Allowed 5 days after the burn, by the
+// account's rent payer, with Iris's attestation and destination message for it.
+const RECLAIM_EVENT_ACCOUNT = [94, 198, 180, 159, 131, 236, 15, 174];
+export const EVENT_ACCOUNT_WINDOW_SECONDS = 5 * 24 * 60 * 60;
+export const MESSAGE_TRANSMITTER_PROGRAM = MESSAGE_TRANSMITTER;
+export const TOKEN_MESSENGER_MINTER_PROGRAM = TOKEN_MESSENGER_MINTER;
+
+// MessageSent account: 8-byte discriminator, rent_payer (32), created_at (i64), message (bytes).
+export function parseEventAccount(data) {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return { rentPayer: new PublicKey(data.subarray(8, 40)), createdAt: Number(view.getBigInt64(40, true)) };
+}
+
+const hexToBytes = (hex) => Uint8Array.from(hex.replace(/^0x/, '').match(/../g), (h) => parseInt(h, 16));
+
+export function buildReclaimTx({ owner, eventAccount, attestation, message, blockhash }) {
+  const att = hexToBytes(attestation), msg = hexToBytes(message);
+  const data = new Uint8Array(8 + 4 + att.length + 4 + msg.length);
+  const view = new DataView(data.buffer);
+  data.set(RECLAIM_EVENT_ACCOUNT, 0);
+  view.setUint32(8, att.length, true);
+  data.set(att, 12);
+  view.setUint32(12 + att.length, msg.length, true);
+  data.set(msg, 16 + att.length);
+  const ix = new TransactionInstruction({
+    programId: MESSAGE_TRANSMITTER,
+    keys: [
+      { pubkey: owner, isSigner: true, isWritable: true }, // payee: gets the rent back
+      { pubkey: MESSAGE_TRANSMITTER_STATE, isSigner: false, isWritable: true },
+      { pubkey: eventAccount, isSigner: false, isWritable: true },
+    ],
+    data,
+  });
+  return new VersionedTransaction(new TransactionMessage({ payerKey: owner, recentBlockhash: blockhash, instructions: [ix] }).compileToV0Message());
+}
+
 // ---------- Jupiter (USDT → USDC) ----------
 
 const JUPITER = 'https://lite-api.jup.ag/swap/v1';

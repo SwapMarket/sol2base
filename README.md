@@ -27,6 +27,10 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
 **SOL needed**: about 0.003 SOL, mostly rent for the account where CCTP records the message (reclaimable from Circle's program after
 5 days), plus network fees; paying with USDT adds the swap fee and, if missing, a USDC token account (~0.002 SOL).
 
+**Reclaiming the rent**: the page remembers each burn's message account in the browser (and finds earlier ones in the wallet's recent
+history on connect, since public RPCs can't search old history or list accounts by owner). Once an account is 5 days old, **Reclaim**
+calls `MessageTransmitterV2.reclaim_event_account` with Circle's attestation and destination message, returning the ~0.003 SOL.
+
 Reads go to public Solana RPCs (publicnode, then Solana's own); transactions are signed by the wallet and sent by the page,
 re-sent until confirmed or expired.
 
