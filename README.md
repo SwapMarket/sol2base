@@ -6,8 +6,8 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
 
 ## Flow
 
-1. **Connect** an injected Solana wallet (Phantom, Solflare, Backpack). On phones, open the page in the wallet app's browser
-   (the page links to Phantom's and Solflare's).
+1. **Connect** an injected Solana wallet (Phantom, Solflare, Backpack, Trust Wallet). On phones, open the page in the wallet app's
+   browser (the page links to Phantom's, Solflare's and Trust Wallet's).
 2. **Optional, pay with USDT**: swap USDT → USDC on Solana via Jupiter's API. Before signing, the page simulates Jupiter's
    transaction and checks that exactly the USDT amount leaves and at least the quoted minimum of USDC arrives.
 3. **Burn** USDC with `TokenMessengerMinterV2.deposit_for_burn_with_hook` (destination domain 6 = Base), built in `solana.js`

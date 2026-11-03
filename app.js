@@ -250,7 +250,7 @@ function refreshForm() {
 
 // ---------- wallet ----------
 
-const findProvider = () => window.phantom?.solana ?? window.solflare ?? window.backpack?.solana ?? window.solana ?? null;
+const findProvider = () => window.phantom?.solana ?? window.solflare ?? window.backpack?.solana ?? window.trustwallet?.solana ?? window.solana ?? null;
 
 async function connect() {
   provider = findProvider();
@@ -496,6 +496,7 @@ for (const r of document.querySelectorAll('input[name=mode], input[name=src]')) 
 const here = encodeURIComponent(location.href);
 $('openPhantom').href = `https://phantom.app/ul/browse/${here}?ref=${encodeURIComponent(location.origin)}`;
 $('openSolflare').href = `https://solflare.com/ul/v1/browse/${here}?ref=${encodeURIComponent(location.origin)}`;
+$('openTrust').href = `https://link.trustwallet.com/open_url?coin_id=501&url=${here}`; // 501 = Solana
 
 if ($('commit').textContent.startsWith('__')) {
   $('commit').textContent = 'dev';
