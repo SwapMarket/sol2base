@@ -709,7 +709,8 @@ async function track(sig, mode) {
 }
 
 async function finish(m, source = null, out = 'USDC', eurcTo = null, topUp = false) {
-  clearPending();
+  // An EURC transfer stays saved (for Resume after a reload) until its swap is done.
+  if (out !== 'EURC') clearPending();
   refreshBalances();
   refreshBaseBalances();
   const body = m.decodedMessage?.decodedMessageBody;
@@ -747,6 +748,7 @@ async function swapToEurc() {
     const r = await B.swapToEurc({ signer: evm, amountIn: p.amountIn, to: getAddress(p.to), topUp: p.topUp, setStatus, inWallet: inBaseWallet });
     setStep('swap', 'done');
     pendingSwap = null;
+    clearPending();
     const dest = p.to === evm.address ? '' : ` for ${short(p.to)}`;
     const gasDone = r.ethOut ? `, plus ${fmtEth(r.ethOut)} ETH for gas from ${fmt(r.topUp)} USDC` : '';
     // The rate is only end-to-end if the whole delivered amount was swapped; it leaves out the gas top-up.
