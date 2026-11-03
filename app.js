@@ -1,5 +1,6 @@
 import { isAddress, getAddress } from 'https://esm.sh/viem@2.21.55';
 import * as S from 'solana';
+import * as B from 'base';
 
 const IRIS = 'https://iris-api.circle.com';
 const FINALITY = { fast: 1000, standard: 2000 };
@@ -24,6 +25,13 @@ let owner = null; // PublicKey
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let bal = null; // { usdc, usdt, sol, usdcAccount }: base units, lamports, whether the USDC account exists
 let busy = false; // a transfer started from the form is in progress
+let evm = null; // Base wallet { address, wallet, ensureBase, name }: needed for EURC (it signs the swap)
+let baseBal = null; // { usdc, eurc, eth, gasPrice } of the Base wallet
+let topUpTouched = false; // the user ticked/unticked the top-up; otherwise it follows the Base gas balance
+let topUpEth = null; // ETH that B.TOPUP_USDC buys right now, for the label
+let pendingSwap = null; // { amountIn, to, topUp, sent, sentAmount, before, fee } for the EURC swap
+// Pre-tick the top-up when Base ETH covers fewer than this many EURC swaps at the current gas price.
+const TOPUP_BELOW_SWAPS = 4n;
 
 // ---------- helpers ----------
 
@@ -31,12 +39,15 @@ const fmt = (v) => (Number(v) / 1e6).toLocaleString(undefined, { maximumFraction
 const fmtSol = (v) => (Number(v) / 1e9).toLocaleString(undefined, { maximumSignificantDigits: 4 });
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const solTx = (s) => `<a href="https://solscan.io/tx/${s}" target="_blank" rel="noopener">${short(s)}</a>`;
-const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
+const baseTx = B.baseTx;
+const fmtEth = (v) => (Number(v) / 1e18).toLocaleString(undefined, { maximumSignificantDigits: 4 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
 const errMsg = (e) => e?.message || String(e);
 const currentMode = () => document.querySelector('input[name=mode]:checked').value;
 const currentSrc = () => document.querySelector('input[name=src]:checked').value;
+const currentOut = () => document.querySelector('input[name=out]:checked').value;
+const topUpOn = () => currentOut() === 'EURC' && $('topUp').checked;
 
 function parseAmount() {
   const v = $('amount').value.trim();
@@ -46,8 +57,10 @@ function parseAmount() {
   return amt > 0n ? amt : null;
 }
 
+// The Base address entered, else the connected Base wallet.
 function recipient() {
   const v = $('recipient').value.trim();
+  if (!v) return evm?.address ?? null;
   return isAddress(v) ? getAddress(v) : null;
 }
 
@@ -136,6 +149,9 @@ function resetSteps() {
     li.querySelector('.elapsed')?.remove();
   }
   document.querySelector('#steps li[data-step="swapIn"]').hidden = currentSrc() !== 'USDT';
+  document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
+  $('retrySwap').hidden = true;
+  pendingSwap = null;
   $('progress').hidden = false;
 }
 
@@ -186,6 +202,33 @@ function requestUsdtQuote(amt) {
   }, 400);
 }
 
+// End-to-end EUR/USD: USDC (or USDT) sent from Solana per EURC received on Base, all fees included.
+const eurUsd = (sent, eurcOut) => (Number(sent) / Number(eurcOut)).toFixed(4);
+let quoteSeq = 0;
+let quoteTimer = null;
+let shownQuoteKey = null; // source:amount:speed:topUp the displayed EURC quote was computed for
+function showEurcQuote(sent, usdcIn, key, usdtNote, topUp) {
+  const seq = ++quoteSeq;
+  clearTimeout(quoteTimer);
+  quoteTimer = setTimeout(async () => {
+    let text;
+    let quoted = false;
+    try {
+      const [{ amountOut }, eth] = await Promise.all([B.quoteEurc(usdcIn - topUp), topUp ? B.quoteTopUp() : null]);
+      quoted = true;
+      const via = usdtNote ? `${usdtNote}, then about` : 'at least';
+      const gasNote = eth ? `, plus about ${fmtEth(eth.amountOut)} ETH for gas from ${fmt(topUp)} USDC, not counted in the rate` : '';
+      text = `You receive about ${fmt(amountOut)} EURC on Base. Effective EUR/USD ${eurUsd(sent - topUp, amountOut)}, all fees included (${via} ${fmt(usdcIn - topUp)} USDC swapped at the current Aerodrome rate, max 0.5% slippage${gasNote})`;
+    } catch (e) {
+      if (key === shownQuoteKey) return; // keep the last good quote for this input
+      text = 'Could not get an Aerodrome quote right now.';
+    }
+    if (seq !== quoteSeq) return;
+    $('receive').textContent = text;
+    shownQuoteKey = quoted ? key : null;
+  }, 400);
+}
+
 // SOL this transfer needs, in lamports.
 function solNeeded(src) {
   return LAMPORTS.eventRent + LAMPORTS.fees + (src === 'USDT' ? LAMPORTS.swap + (bal?.usdcAccount ? 0n : LAMPORTS.usdcAccount) : 0n);
@@ -193,7 +236,27 @@ function solNeeded(src) {
 
 function refreshForm() {
   if (busy) return; // keep the form as submitted while a transfer runs
+  quoteSeq++; // drop any in-flight EURC quote
   const src = currentSrc();
+
+  // EURC needs a Base wallet that can pay gas for the swap (more with the top-up) at the current price.
+  const eurcRadio = document.querySelector('input[name=out][value=EURC]');
+  const swapGas = baseBal ? B.GAS_UNITS.swap * baseBal.gasPrice : 0n;
+  const eurcOk = !!evm && (!baseBal || baseBal.eth >= swapGas);
+  const topUpOk = !!baseBal && baseBal.eth >= (B.GAS_UNITS.swap + B.GAS_UNITS.topUp) * baseBal.gasPrice;
+  eurcRadio.disabled = !eurcOk;
+  if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
+  $('eurcHint').textContent = !evm ? '· needs a connected Base wallet with a little ETH for gas'
+    : eurcOk ? '· needs a little ETH on Base for gas'
+      : `· needs ETH on Base for gas: you have ${fmtEth(baseBal.eth)}, the swap takes about ${fmtEth(swapGas)}`;
+  $('topUp').disabled = !topUpOk;
+  if (!topUpOk) $('topUp').checked = false;
+  else if (!topUpTouched) $('topUp').checked = baseBal.eth < TOPUP_BELOW_SWAPS * swapGas;
+  if (topUpEth) $('topUpEth').textContent = `about ${fmtEth(topUpEth)} ETH`;
+  $('topUpRow').hidden = currentOut() !== 'EURC';
+  const topUp = topUpOn() ? B.TOPUP_USDC : 0n;
+  $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
+  $('recipient').placeholder = evm ? `defaults to your Base wallet ${short(evm.address)}` : '0x… your Base (EVM) address';
   const amt = parseAmount();
   $('amountLabel').textContent = `Amount (${src})`;
 
@@ -222,9 +285,14 @@ function refreshForm() {
     label = usdtQuote?.key === amt && usdtQuote.error ? 'No USDT → USDC route right now' : 'Getting USDT → USDC quote…';
   } else if (amt) {
     const fee = maxFeeFor(usdc, currentMode());
-    if (usdc <= fee) {
+    if (usdc <= fee + 2n * topUp) {
       ok = false;
-      label = 'Amount must be larger than the fee';
+      label = topUp ? 'Amount too small for the fee and the gas top-up' : 'Amount must be larger than the fee';
+    } else if (currentOut() === 'EURC') {
+      // Keep the shown quote while it refreshes for the same input, so the layout doesn't jump.
+      const key = `${src}:${amt}:${currentMode()}:${topUp}`;
+      receive = key === shownQuoteKey ? $('receive').textContent : 'Getting Aerodrome quote…';
+      showEurcQuote(amt, usdc - fee, key, usdtNote, topUp);
     } else {
       receive = usdtNote
         ? `You receive about ${fmt(usdc - fee)} USDC on Base (${usdtNote}, then Circle's fee)`
@@ -232,6 +300,7 @@ function refreshForm() {
     }
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
+  if (!receive.includes('EURC')) shownQuoteKey = null;
 
   let solWarn = '';
   if (owner && amt && bal) {
@@ -321,6 +390,8 @@ async function connectWalletConnect() {
   const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
   const { uri, approval } = await client.connect({
     requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },
+    // The same wallet's Base account, if it has one: recipient, and signer of the EURC swap.
+    optionalNamespaces: { eip155: { chains: ['eip155:8453'], methods: ['eth_sendTransaction'], events: ['accountsChanged', 'chainChanged'] } },
   });
   if (uri) modal.openModal({ uri });
   let session;
@@ -343,8 +414,10 @@ async function connectWalletConnect() {
       return tx;
     },
   };
-  client.on('session_delete', () => setOwner(null));
+  client.on('session_delete', () => { setOwner(null); setEvm(null); });
   setOwner(pk);
+  const baseAccount = session.namespaces.eip155?.accounts.find((a) => a.startsWith('eip155:8453:'));
+  if (baseAccount) setEvm({ ...B.walletConnectBaseWallet(client, session.topic, baseAccount.split(':')[2]), name: session.peer.metadata.name });
 }
 
 async function connect(silent = false) {
@@ -384,6 +457,36 @@ async function refreshBalances() {
 }
 
 const inWallet = () => `in ${wallet?.name && wallet.name !== 'wallet' ? wallet.name : 'your wallet'}`;
+const inBaseWallet = () => `in ${evm?.name ?? 'your Base wallet'}`;
+
+async function connectBase() {
+  if (!window.ethereum) { alert('No Base (EVM) wallet found in this browser. Use QR to connect a phone wallet such as Trust Wallet, which covers both Solana and Base.'); return; }
+  const w = await B.injectedBaseWallet(window.ethereum);
+  setEvm({ ...w, name: window.ethereum.isRabby ? 'Rabby' : window.ethereum.isPhantom ? 'Phantom' : window.ethereum.isMetaMask ? 'MetaMask' : 'your Base wallet' });
+  window.ethereum.on?.('accountsChanged', (accs) => (accs[0] ? connectBase() : setEvm(null)));
+}
+
+function setEvm(e) {
+  evm = e;
+  $('evmAccount').textContent = evm ? `Base wallet (${evm.name}): ${short(evm.address)}` : 'Base wallet: not connected (needed for EURC)';
+  $('connectBase').hidden = !!evm;
+  $('baseBalances').hidden = !evm;
+  refreshBaseBalances();
+}
+
+async function refreshBaseBalances() {
+  if (!evm) { baseBal = null; refreshForm(); return; }
+  try {
+    baseBal = await B.baseBalances(evm.address);
+    $('balBaseUsdc').textContent = fmt(baseBal.usdc);
+    $('balEurc').textContent = fmt(baseBal.eurc);
+    $('gasBase').textContent = fmtEth(baseBal.eth);
+    topUpEth = (await B.quoteTopUp()).amountOut;
+  } catch (e) {
+    console.warn('base balances', e);
+  }
+  refreshForm();
+}
 
 // Have the wallet sign (then any extra signers), send it ourselves (re-sending until it lands), and
 // wait for confirmation. Throws if it fails on chain or expires unconfirmed (then nothing was spent).
@@ -436,14 +539,19 @@ async function swapUsdtToUsdc(amountIn) {
 
 async function bridge() {
   let amount = parseAmount();
-  const to = recipient();
+  const out = currentOut();
+  if (out === 'EURC' && !evm) return;
+  // For EURC the USDC is minted to the Base wallet, which signs the swap; the recipient only gets the EURC.
+  const to = out === 'EURC' ? evm.address : recipient();
+  const eurcTo = out === 'EURC' ? recipient() : null;
+  const topUp = topUpOn();
   if (!amount || !fees || !to || !owner) return;
   const src = currentSrc();
   const shownUsdc = src === 'USDT' ? (usdtQuote?.key === amount && !usdtQuote.error ? BigInt(usdtQuote.quote.outAmount) : null) : amount;
   if (!shownUsdc) return;
   await askNotifications();
   const mode = currentMode();
-  try { localStorage.setItem(RECIPIENT_KEY, to); } catch {}
+  try { if ($('recipient').value.trim()) localStorage.setItem(RECIPIENT_KEY, recipient()); } catch {}
 
   $('bridge').disabled = true;
   resetSteps();
@@ -479,11 +587,11 @@ async function bridge() {
     setStatus(`Confirm the burn of ${fmt(amount)} USDC ${inWallet()}…`);
     const sig = await signAndSend(tx, lastValidBlockHeight, 'Burn', [eventKeypair]);
     unburned = null;
-    savePending(sig);
+    savePending({ sig, out, eurcTo, topUp });
     setStep('burn', 'done');
     refreshBalances();
 
-    await finish(await track(sig, mode), source);
+    await finish(await track(sig, mode), source, out, eurcTo, topUp);
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -504,8 +612,10 @@ async function resume() {
   await askNotifications();
   resetSteps();
   setStep('burn', 'done');
+  const saved = loadPending();
+  const same = saved?.sig === sig;
   try {
-    await finish(await track(sig));
+    await finish(await track(sig), null, same ? saved.out : currentOut(), same ? saved.eurcTo : recipient(), same ? saved.topUp : topUpOn());
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -543,33 +653,76 @@ async function track(sig, mode) {
   }
 }
 
-function finish(m, source = null) {
+async function finish(m, source = null, out = 'USDC', eurcTo = null, topUp = false) {
   clearPending();
   refreshBalances();
+  refreshBaseBalances();
   const body = m.decodedMessage?.decodedMessageBody;
   const link = baseTx(m.forwardTxHash);
   if (!body?.amount) {
-    setStatus(`Done! USDC minted on Base ${link}.`, 'ok');
+    setStatus(out === 'EURC' ? `USDC minted on Base ${link}, but the transfer amount couldn't be read, so no swap was made.` : `Done! USDC minted on Base ${link}.`, out === 'EURC' ? 'err' : 'ok');
     return;
   }
   const burned = BigInt(body.amount);
   const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
-  const to = `0x${body.mintRecipient.slice(-40)}`;
+  const minted = burned - fee;
+  const to = getAddress(`0x${body.mintRecipient.slice(-40)}`);
   const sent = source ? `${fmt(source.amount)} USDT` : `${fmt(burned)} USDC`;
   const before = source ? `USDT → ${fmt(burned)} USDC via Jupiter, ` : '';
-  setStatus(`Done! ${sent} → ${fmt(burned - fee)} USDC on Base for ${short(getAddress(to))} ${link}. Fees: ${before}Circle's fee ${fmt(fee)} USDC. The ${fmtSol(LAMPORTS.eventRent)} SOL message-account rent can be reclaimed after 5 days.`, 'ok');
+  const rent = `The ${fmtSol(LAMPORTS.eventRent)} SOL message-account rent can be reclaimed after 5 days.`;
+  if (out !== 'EURC') {
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Base for ${short(to)} ${link}. Fees: ${before}Circle's fee ${fmt(fee)} USDC. ${rent}`, 'ok');
+    return;
+  }
+  // Swap only what this transfer delivered, never other USDC in the wallet.
+  pendingSwap = { signer: to, amountIn: minted, to: eurcTo ?? to, topUp, sent, sentAmount: source?.amount ?? burned, before, fee, rent };
+  setStatus(`${fmt(minted)} USDC minted on Base ${link}. Now swapping to EURC…`);
+  await swapToEurc();
+}
+
+// Swap the bridged USDC to EURC, signed by the Base wallet the USDC was minted to.
+async function swapToEurc() {
+  if (!pendingSwap) return;
+  const p = pendingSwap;
+  $('retrySwap').hidden = true;
+  setStep('swap', 'active');
+  try {
+    if (!evm) throw new Error('Connect your Base wallet to swap.');
+    if (evm.address !== p.signer) throw new Error(`The USDC went to ${short(p.signer)}. Connect that Base wallet to swap.`);
+    const r = await B.swapToEurc({ signer: evm, amountIn: p.amountIn, to: getAddress(p.to), topUp: p.topUp, setStatus, inWallet: inBaseWallet });
+    setStep('swap', 'done');
+    pendingSwap = null;
+    const dest = p.to === evm.address ? '' : ` for ${short(p.to)}`;
+    const gasDone = r.ethOut ? `, plus ${fmtEth(r.ethOut)} ETH for gas from ${fmt(r.topUp)} USDC` : '';
+    // The rate is only end-to-end if the whole delivered amount was swapped; it leaves out the gas top-up.
+    setStatus(r.amountIn === p.amountIn
+      ? `Done! ${p.sent} → ${fmt(r.eurcOut)} EURC${dest}${gasDone}. Effective EUR/USD ${eurUsd(p.sentAmount - r.topUp, r.eurcOut)}, all fees included (${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Aerodrome swap ${baseTx(r.hash)}). ${p.rent}`
+      : `Done! Swapped ${fmt(r.amountIn)} USDC to ${fmt(r.eurcOut)} EURC${dest}${gasDone} on Aerodrome ${baseTx(r.hash)}.`, 'ok');
+    refreshBaseBalances();
+  } catch (e) {
+    console.error(e);
+    setStatus(`Swap failed: ${errMsg(e)} Your USDC is safe on Base.`, 'err');
+    $('retrySwap').hidden = false;
+  }
 }
 
 // ---------- persistence ----------
 
-function savePending(sig) { try { localStorage.setItem(PENDING_KEY, sig); } catch {} }
+function savePending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch {} }
 function clearPending() { try { localStorage.removeItem(PENDING_KEY); } catch {} }
+function loadPending() {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    return raw ? (raw.startsWith('{') ? JSON.parse(raw) : { sig: raw, out: 'USDC' }) : null;
+  } catch { return null; }
+}
 function loadSaved() {
   try {
-    const sig = localStorage.getItem(PENDING_KEY);
-    if (sig) {
-      $('resumeSig').value = sig;
+    const p = loadPending();
+    if (p) {
+      $('resumeSig').value = p.sig;
       $('resumeSig').closest('details').open = true;
+      if (p.out === 'EURC') document.querySelector('input[name=out][value=EURC]').checked = true;
     }
     const to = localStorage.getItem(RECIPIENT_KEY);
     if (to) $('recipient').value = to;
@@ -580,6 +733,9 @@ function loadSaved() {
 
 $('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
 $('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(e)));
+$('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
+$('retrySwap').onclick = swapToEurc;
+$('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
 $('amount').oninput = refreshForm;
@@ -589,7 +745,7 @@ $('max').onclick = () => {
   $('amount').value = (Number(currentSrc() === 'USDT' ? bal.usdt : bal.usdc) / 1e6).toString();
   refreshForm();
 };
-for (const r of document.querySelectorAll('input[name=mode], input[name=src]')) r.onchange = refreshForm;
+for (const r of document.querySelectorAll('input[name=mode], input[name=src], input[name=out]')) r.onchange = refreshForm;
 // On a phone without an injected wallet, open this page inside the wallet app's browser.
 const here = encodeURIComponent(location.href);
 $('openPhantom').href = `https://phantom.app/ul/browse/${here}?ref=${encodeURIComponent(location.origin)}`;
@@ -603,6 +759,6 @@ if ($('commit').textContent.startsWith('__')) {
 
 loadSaved();
 loadFees();
-setInterval(() => { loadFees(); refreshBalances(); }, 30_000);
+setInterval(() => { loadFees(); refreshBalances(); refreshBaseBalances(); }, 30_000);
 // Wallets that remember this site connect without a prompt (after standard wallets have registered).
 setTimeout(() => connect(true).catch(() => {}), 300);

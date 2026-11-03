@@ -16,6 +16,11 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
    the amount. `maxFee` = protocol fee + forwarding fee (`high` tier from `GET /v2/burn/USDC/fees/5/6?forward=true`); Circle charges
    it in full. The burn is simulated before the wallet is asked to sign.
 4. **Track**: poll `GET https://iris-api.circle.com/v2/messages/5?transactionHash=<signature>` until `forwardTxHash` (the Base mint).
+5. **Optional, receive EURC**: needs a Base wallet — the WalletConnect session's Base account (one QR covers both chains, e.g. Trust
+   Wallet) or an injected one (Rabby, MetaMask, Phantom). The USDC is minted to that wallet, which then swaps it on Aerodrome Slipstream
+   (`base.js`, ported from eth2base) and sends the EURC to the recipient (the Base wallet by default). Optional gas top-up: 0.20 USDC
+   swapped to ETH for the Base wallet in the same transaction, pre-ticked when its ETH covers fewer than 4 swaps. EURC is disabled when
+   the Base wallet can't pay the swap gas at the current price.
 
 **SOL needed**: about 0.003 SOL, mostly rent for the account where CCTP records the message (reclaimable from Circle's program after
 5 days), plus network fees; paying with USDT adds the swap fee and, if missing, a USDC token account (~0.002 SOL).

@@ -26,7 +26,7 @@ jobs:
       - name: Build site with commit hash
         run: |
           mkdir _site
-          cp index.html app.js solana.js style.css icon.png sw.js _site/
+          cp index.html app.js solana.js base.js style.css icon.png sw.js _site/
           sed -i "s/__COMMIT_SHORT__/${GITHUB_SHA::7}/g; s/__COMMIT__/${GITHUB_SHA}/g" _site/index.html
           ! grep -q '__COMMIT' _site/index.html
 

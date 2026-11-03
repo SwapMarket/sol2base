@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
   <link rel="stylesheet" href="style.css?v=__COMMIT__">
-  <script type="importmap">{ "imports": { "solana": "./solana.js?v=__COMMIT__" } }</script>
+  <script type="importmap">{ "imports": { "solana": "./solana.js?v=__COMMIT__", "base": "./base.js?v=__COMMIT__" } }</script>
 </head>
 <body>
   <main>
@@ -32,6 +32,13 @@
       <div id="balances" hidden>
         <div class="bal"><span class="chain">Solana</span><span class="vals"><span><b id="balUsdc">–</b> USDC</span><span><b id="balUsdt">–</b> USDT</span><span><b id="balSol">–</b> SOL</span></span></div>
       </div>
+      <div class="row between base-wallet">
+        <span id="evmAccount" class="muted">Base wallet: not connected (needed for EURC)</span>
+        <button id="connectBase" class="ghost" type="button" title="Rabby, MetaMask, Phantom… — or use QR above, which connects Base too">Connect Base wallet</button>
+      </div>
+      <div id="baseBalances" hidden>
+        <div class="bal"><span class="chain">Base</span><span class="vals"><span><b id="balBaseUsdc">–</b> USDC</span><span><b id="balEurc">–</b> EURC</span><span><b id="gasBase">–</b> ETH gas</span></span></div>
+      </div>
     </section>
 
     <section class="card">
@@ -47,7 +54,14 @@
         <button id="max" class="ghost" type="button">Max</button>
       </div>
 
-      <label for="recipient">Recipient on Base</label>
+      <fieldset>
+        <legend>Receive as</legend>
+        <label class="radio"><input type="radio" name="out" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="out" value="EURC"> EURC, swapped on Aerodrome <span class="muted" id="eurcHint">· needs a connected Base wallet with a little ETH for gas</span></label>
+        <label class="radio topup" id="topUpRow" hidden><input type="checkbox" id="topUp"> Top up gas: swap 0.20 USDC to <span id="topUpEth">ETH</span> on Base, in the same transaction</label>
+      </fieldset>
+
+      <label for="recipient" id="recipientLabel">Recipient on Base</label>
       <input id="recipient" type="text" placeholder="0x… your Base (EVM) address" autocomplete="off" spellcheck="false">
 
       <fieldset>
@@ -67,8 +81,10 @@
         <li data-step="burn">Burn USDC on Solana</li>
         <li data-step="attest">Wait for Circle attestation</li>
         <li data-step="mint">Circle mints on Base</li>
+        <li data-step="swap" hidden>Swap USDC to EURC on Aerodrome</li>
       </ol>
       <div id="status" class="status"></div>
+      <button id="retrySwap" hidden>Swap to EURC</button>
     </section>
 
     <details class="card">
