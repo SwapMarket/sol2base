@@ -148,4 +148,4 @@ export async function checkSwapBySimulation(rpc, tx, owner, amountIn, minOut) {
   return received;
 }
 
-export { PublicKey };
+export { PublicKey, VersionedTransaction };

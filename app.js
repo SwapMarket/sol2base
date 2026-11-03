@@ -16,7 +16,7 @@ const RECIPIENT_KEY = 'sol2base:recipient';
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 
 const $ = (id) => document.getElementById(id);
-let provider = null; // injected Solana wallet
+let wallet = null; // { name, signTransaction(VersionedTransaction) → VersionedTransaction }
 let owner = null; // PublicKey
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let bal = null; // { usdc, usdt, sol, usdcAccount }: base units, lamports, whether the USDC account exists
@@ -250,24 +250,60 @@ function refreshForm() {
 
 // ---------- wallet ----------
 
-const findProvider = () => window.phantom?.solana ?? window.solflare ?? window.backpack?.solana ?? window.trustwallet?.solana ?? window.solana ?? null;
-
-async function connect() {
-  provider = findProvider();
-  if (!provider) {
-    $('noWallet').hidden = false;
-    return;
+// Solana wallets announce themselves through the Wallet Standard (Phantom, Solflare, Backpack, Trust…).
+// It passes transactions as bytes, so it works whatever Solana library the wallet uses; the older
+// injected objects (window.phantom.solana etc.) are only a fallback.
+const standardWallets = [];
+const registerWallet = (w) => {
+  if (w.features?.['solana:signTransaction'] && w.features?.['standard:connect'] && w.chains?.some((c) => c.startsWith('solana:'))) {
+    standardWallets.push(w);
   }
-  const res = await provider.connect();
-  const pk = res?.publicKey ?? provider.publicKey;
+};
+window.addEventListener('wallet-standard:register-wallet', ({ detail: callback }) => callback({ register: registerWallet }));
+window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: { register: registerWallet } }));
+
+const findInjected = () => window.phantom?.solana ?? window.solflare ?? window.backpack?.solana ?? window.trustwallet?.solana ?? window.solana ?? null;
+
+async function connectStandard(w, silent) {
+  const { accounts } = await w.features['standard:connect'].connect(silent ? { silent: true } : undefined);
+  const account = accounts?.[0] ?? w.accounts[0];
+  if (!account) throw new Error('No account');
+  wallet = {
+    name: w.name,
+    // Pass the wallet's own account object: some wallets (Trust) check it by identity.
+    signTransaction: async (tx) => {
+      const [{ signedTransaction }] = await w.features['solana:signTransaction'].signTransaction({ account, transaction: tx.serialize(), chain: 'solana:mainnet' });
+      return S.VersionedTransaction.deserialize(signedTransaction);
+    },
+  };
+  setOwner(new S.PublicKey(account.address));
+  w.features['standard:events']?.on('change', ({ accounts }) => {
+    if (accounts) setOwner(accounts[0] ? new S.PublicKey(accounts[0].address) : null);
+  });
+}
+
+async function connectInjected(p, silent) {
+  const res = await p.connect(silent ? { onlyIfTrusted: true } : undefined);
+  const pk = res?.publicKey ?? p.publicKey;
+  wallet = {
+    name: p.isPhantom ? 'Phantom' : p.isSolflare ? 'Solflare' : 'wallet',
+    signTransaction: async (tx) => S.VersionedTransaction.deserialize((await p.signTransaction(tx)).serialize()),
+  };
   setOwner(pk ? new S.PublicKey(pk.toString()) : null);
-  provider.on?.('accountChanged', (pk) => setOwner(pk ? new S.PublicKey(pk.toString()) : null));
-  provider.on?.('disconnect', () => setOwner(null));
+  p.on?.('accountChanged', (pk) => setOwner(pk ? new S.PublicKey(pk.toString()) : null));
+  p.on?.('disconnect', () => setOwner(null));
+}
+
+async function connect(silent = false) {
+  if (standardWallets.length) return connectStandard(standardWallets[0], silent);
+  const p = findInjected();
+  if (p) return connectInjected(p, silent);
+  if (!silent) $('noWallet').hidden = false;
 }
 
 function setOwner(pk) {
   owner = pk;
-  $('account').textContent = owner ? `Connected: ${short(owner.toBase58())}` : 'Not connected';
+  $('account').textContent = owner ? `Connected${wallet?.name ? ` (${wallet.name})` : ''}: ${short(owner.toBase58())}` : 'Not connected';
   $('connect').textContent = owner ? 'Connected' : 'Connect Solana wallet';
   $('connect').disabled = !!owner;
   $('balances').hidden = !owner;
@@ -293,12 +329,19 @@ async function refreshBalances() {
   refreshForm();
 }
 
-const inWallet = () => 'in your wallet';
+const inWallet = () => `in ${wallet?.name && wallet.name !== 'wallet' ? wallet.name : 'your wallet'}`;
 
 // Have the wallet sign (then any extra signers), send it ourselves (re-sending until it lands), and
 // wait for confirmation. Throws if it fails on chain or expires unconfirmed (then nothing was spent).
 async function signAndSend(tx, lastValidBlockHeight, label, extraSigners = []) {
-  const signed = await provider.signTransaction(tx);
+  // If the wallet doesn't answer for a minute, say so rather than looking stuck.
+  const slow = setTimeout(() => setStatus(`Still waiting for ${wallet?.name ?? 'the wallet'} to return the signed ${label.toLowerCase()}. If you already confirmed, switch back to the wallet and check it; if you rejected it, reload the page.`), 60_000);
+  let signed;
+  try {
+    signed = await wallet.signTransaction(tx);
+  } finally {
+    clearTimeout(slow);
+  }
   if (extraSigners.length) signed.sign(extraSigners);
   const raw = b64(signed.serialize());
   const sig = await rpc('sendTransaction', [raw, { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 0 }]);
@@ -506,5 +549,5 @@ if ($('commit').textContent.startsWith('__')) {
 loadSaved();
 loadFees();
 setInterval(() => { loadFees(); refreshBalances(); }, 30_000);
-// Wallets that remember this site connect without a prompt.
-findProvider()?.connect?.({ onlyIfTrusted: true }).then(() => connect()).catch(() => {});
+// Wallets that remember this site connect without a prompt (after standard wallets have registered).
+setTimeout(() => connect(true).catch(() => {}), 300);
