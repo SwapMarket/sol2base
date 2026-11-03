@@ -17,6 +17,8 @@ const RECIPIENT_KEY = 'sol2base:recipient';
 // The public RPCs can't search old history or list accounts by owner, so the page remembers them to
 // reclaim the message-account rent after 5 days.
 const BURNS_KEY = 'sol2base:burns';
+const FORM_KEY = 'sol2base:form'; // the form's choices, restored on reload
+const BASE_WALLET_KEY = 'sol2base:baseWallet'; // 'injected' when an extension Base wallet was connected
 // Public Solana RPCs that answer browser requests; the first one that works is used.
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 // Reown (WalletConnect) project, shared with eth2base; Solana mainnet's CAIP-2 chain id.
@@ -32,6 +34,7 @@ let busy = false; // a transfer started from the form is in progress
 let evm = null; // Base wallet { address, wallet, ensureBase, name }: needed for EURC (it signs the swap)
 let baseBal = null; // { usdc, eurc, eth, gasPrice } of the Base wallet
 let topUpTouched = false; // the user ticked/unticked the top-up; otherwise it follows the Base gas balance
+let preferredOut = 'USDC'; // the user's choice; EURC is re-selected once a Base wallet makes it available
 let topUpEth = null; // ETH that B.TOPUP_USDC buys right now, for the label
 let pendingSwap = null; // { amountIn, to, topUp, sent, sentAmount, before, fee } for the EURC swap
 // Pre-tick the top-up when Base ETH covers fewer than this many EURC swaps at the current gas price.
@@ -248,8 +251,10 @@ function refreshForm() {
   const eurcRadio = document.querySelector('input[name=out][value=EURC]');
   const swapGas = baseBal ? B.GAS_UNITS.swap * baseBal.gasPrice : 0n;
   const eurcOk = !!evm && (!baseBal || baseBal.eth >= swapGas);
-  const topUpOk = !!baseBal && baseBal.eth >= (B.GAS_UNITS.swap + B.GAS_UNITS.topUp) * baseBal.gasPrice;
+  // Unknown until the Base balances load: leave the box as it is meanwhile.
+  const topUpOk = !baseBal || baseBal.eth >= (B.GAS_UNITS.swap + B.GAS_UNITS.topUp) * baseBal.gasPrice;
   eurcRadio.disabled = !eurcOk;
+  if (eurcOk && preferredOut === 'EURC') eurcRadio.checked = true;
   $('sweep').hidden = !evm || !baseBal?.usdc;
   $('sweep').disabled = !eurcOk;
   if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
@@ -258,12 +263,20 @@ function refreshForm() {
       : `· needs ETH on Base for gas: you have ${fmtEth(baseBal.eth)}, the swap takes about ${fmtEth(swapGas)}`;
   $('topUp').disabled = !topUpOk;
   if (!topUpOk) $('topUp').checked = false;
-  else if (!topUpTouched) $('topUp').checked = baseBal.eth < TOPUP_BELOW_SWAPS * swapGas;
+  else if (!topUpTouched && baseBal) $('topUp').checked = baseBal.eth < TOPUP_BELOW_SWAPS * swapGas;
   if (topUpEth) $('topUpEth').textContent = `about ${fmtEth(topUpEth)} ETH`;
   $('topUpRow').hidden = currentOut() !== 'EURC';
   const topUp = topUpOn() ? B.TOPUP_USDC : 0n;
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
   $('recipient').placeholder = evm ? `defaults to your Base wallet ${short(evm.address)}` : '0x… your Base (EVM) address';
+  // Say whose address the recipient is.
+  const typed = $('recipient').value.trim();
+  $('recipientHint').textContent = !typed
+    ? (evm ? `Using your connected Base wallet (${evm.name}).` : '')
+    : !isAddress(typed) ? ''
+      : evm && getAddress(typed) === evm.address ? `This is your connected Base wallet (${evm.name}).`
+        : evm ? `Not your connected Base wallet (${short(evm.address)}): make sure you control this address.`
+          : 'Make sure you control this address on Base.';
   const amt = parseAmount();
   $('amountLabel').textContent = `Amount (${src})`;
 
@@ -385,17 +398,37 @@ function base58Decode(s) {
 }
 
 // A phone wallet over WalletConnect: QR code on desktop, wallet list or link on phones.
-async function connectWalletConnect() {
-  const [{ SignClient }, { WalletConnectModal }] = await Promise.all([
-    import('https://esm.sh/@walletconnect/sign-client@2.17.2'),
-    import('https://esm.sh/@walletconnect/modal@2.7.0'),
-  ]);
-  const client = await SignClient.init({
+let wcClient = null;
+async function wcInit() {
+  if (wcClient) return wcClient;
+  const { SignClient } = await import('https://esm.sh/@walletconnect/sign-client@2.17.2');
+  wcClient = await SignClient.init({
     projectId: WALLETCONNECT_PROJECT_ID,
     // The page's own URL (not just the origin, which is a different site with its own favicon), so wallets
     // that look up the site's icon find this one.
     metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: new URL('.', location.href).href, icons: [new URL('icon.png', location.href).href] },
   });
+  wcClient.on('session_delete', () => { setOwner(null); setEvm(null); });
+  return wcClient;
+}
+
+// A stored, still-valid WalletConnect session with a Solana account (sessions survive reloads).
+const wcStoredSession = (client) => client.session.getAll()
+  .filter((s) => s.namespaces.solana?.accounts.length && s.expiry * 1000 > Date.now())
+  .sort((a, b) => b.expiry - a.expiry)[0];
+
+// On load: reuse a stored session without showing a QR code.
+async function restoreWalletConnect() {
+  if (!Object.keys(localStorage).some((k) => k.startsWith('wc@2:client'))) return false;
+  const client = await wcInit();
+  const session = wcStoredSession(client);
+  if (!session) return false;
+  useWalletConnectSession(client, session);
+  return true;
+}
+
+async function connectWalletConnect() {
+  const [client, { WalletConnectModal }] = await Promise.all([wcInit(), import('https://esm.sh/@walletconnect/modal@2.7.0')]);
   const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
   const { uri, approval } = await client.connect({
     requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },
@@ -413,6 +446,10 @@ async function connectWalletConnect() {
   } finally {
     modal.closeModal();
   }
+  useWalletConnectSession(client, session);
+}
+
+function useWalletConnectSession(client, session) {
   const address = session.namespaces.solana.accounts[0].split(':')[2];
   const pk = new S.PublicKey(address);
   wallet = {
@@ -434,7 +471,6 @@ async function connectWalletConnect() {
       })).signature
       : null,
   };
-  client.on('session_delete', () => { setOwner(null); setEvm(null); });
   setOwner(pk);
   const baseAccount = session.namespaces.eip155?.accounts.find((a) => a.startsWith('eip155:8453:'));
   if (baseAccount) setEvm({ ...B.walletConnectBaseWallet(client, session.topic, baseAccount.split(':')[2]), name: session.peer.metadata.name });
@@ -485,6 +521,7 @@ async function connectBase() {
   if (!window.ethereum) { alert('No Base (EVM) wallet found in this browser. Use QR to connect a phone wallet such as Trust Wallet, which covers both Solana and Base.'); return; }
   const w = await B.injectedBaseWallet(window.ethereum);
   setEvm({ ...w, name: window.ethereum.isRabby ? 'Rabby' : window.ethereum.isPhantom ? 'Phantom' : window.ethereum.isMetaMask ? 'MetaMask' : 'your Base wallet' });
+  try { localStorage.setItem(BASE_WALLET_KEY, 'injected'); } catch {}
   window.ethereum.on?.('accountsChanged', (accs) => (accs[0] ? connectBase() : setEvm(null)));
 }
 
@@ -903,13 +940,35 @@ function loadPending() {
     return raw ? (raw.startsWith('{') ? JSON.parse(raw) : { sig: raw, out: 'USDC' }) : null;
   } catch { return null; }
 }
+function saveForm() {
+  const v = (name) => document.querySelector(`input[name=${name}]:checked`).value;
+  try {
+    localStorage.setItem(FORM_KEY, JSON.stringify({
+      src: v('src'), amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
+    }));
+  } catch {}
+}
+function loadForm() {
+  try {
+    const f = JSON.parse(localStorage.getItem(FORM_KEY) ?? 'null');
+    if (!f) return;
+    const pick = (name, value) => { const el = document.querySelector(`input[name=${name}][value="${value}"]`); if (el) el.checked = true; };
+    pick('src', f.src);
+    pick('mode', f.mode);
+    if (f.amount) $('amount').value = f.amount;
+    preferredOut = f.out === 'EURC' ? 'EURC' : 'USDC';
+    if (f.topUp !== null && f.topUp !== undefined) { topUpTouched = true; $('topUp').checked = f.topUp; }
+  } catch {}
+}
+
 function loadSaved() {
+  loadForm();
   try {
     const p = loadPending();
     if (p) {
       $('resumeSig').value = p.sig;
       $('resumeSig').closest('details').open = true;
-      if (p.out === 'EURC') document.querySelector('input[name=out][value=EURC]').checked = true;
+      if (p.out === 'EURC') preferredOut = 'EURC';
     }
     const to = localStorage.getItem(RECIPIENT_KEY);
     if (to) $('recipient').value = to;
@@ -924,17 +983,28 @@ $('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
 $('retrySwap').onclick = swapToEurc;
 $('sweep').onclick = sweep;
 $('reclaim').onclick = reclaim;
-$('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
+$('topUp').onchange = () => { topUpTouched = true; refreshForm(); saveForm(); };
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
-$('amount').oninput = refreshForm;
-$('recipient').oninput = refreshForm;
+$('amount').oninput = () => { refreshForm(); saveForm(); };
+$('recipient').oninput = () => {
+  refreshForm();
+  const r = $('recipient').value.trim();
+  try { if (!r) localStorage.removeItem(RECIPIENT_KEY); else if (isAddress(r)) localStorage.setItem(RECIPIENT_KEY, getAddress(r)); } catch {}
+};
 $('max').onclick = () => {
   if (!bal) return;
   $('amount').value = (Number(currentSrc() === 'USDT' ? bal.usdt : bal.usdc) / 1e6).toString();
   refreshForm();
+  saveForm();
 };
-for (const r of document.querySelectorAll('input[name=mode], input[name=src], input[name=out]')) r.onchange = refreshForm;
+for (const r of document.querySelectorAll('input[name=mode], input[name=src], input[name=out]')) {
+  r.onchange = () => {
+    if (r.name === 'out') preferredOut = r.value;
+    refreshForm();
+    saveForm();
+  };
+}
 // On a phone without an injected wallet, open this page inside the wallet app's browser.
 const here = encodeURIComponent(location.href);
 $('openPhantom').href = `https://phantom.app/ul/browse/${here}?ref=${encodeURIComponent(location.origin)}`;
@@ -950,4 +1020,14 @@ loadSaved();
 loadFees();
 setInterval(() => { loadFees(); refreshBalances(); refreshBaseBalances(); refreshRent().catch(() => {}); }, 30_000);
 // Wallets that remember this site connect without a prompt (after standard wallets have registered).
-setTimeout(() => connect(true).catch(() => {}), 300);
+// Reconnect what was connected before: a stored WalletConnect session (both chains), else a wallet that
+// remembers this site; and an extension Base wallet if one was connected (no prompt: eth_accounts).
+setTimeout(async () => {
+  const restored = await restoreWalletConnect().catch((e) => { console.warn('walletconnect restore', e); return false; });
+  if (!restored) connect(true).catch(() => {});
+  try {
+    if (!evm && localStorage.getItem(BASE_WALLET_KEY) === 'injected' && (await window.ethereum?.request({ method: 'eth_accounts' }))?.length) {
+      await connectBase();
+    }
+  } catch (e) { console.warn('base wallet restore', e); }
+}, 300);
