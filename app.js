@@ -14,6 +14,9 @@ const PENDING_KEY = 'sol2base:pendingBurn';
 const RECIPIENT_KEY = 'sol2base:recipient';
 // Public Solana RPCs that answer browser requests; the first one that works is used.
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
+// Reown (WalletConnect) project, shared with eth2base; Solana mainnet's CAIP-2 chain id.
+const WALLETCONNECT_PROJECT_ID = 'c001d9e3d0c6308a5ce7e5932d40064a';
+const WC_SOLANA = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
 
 const $ = (id) => document.getElementById(id);
 let wallet = null; // { name, signTransaction(VersionedTransaction) → VersionedTransaction }
@@ -294,6 +297,56 @@ async function connectInjected(p, silent) {
   p.on?.('disconnect', () => setOwner(null));
 }
 
+// Base58 → bytes (for signatures returned over WalletConnect).
+function base58Decode(s) {
+  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  let n = 0n;
+  for (const ch of s) n = n * 58n + BigInt(alphabet.indexOf(ch));
+  const bytes = [];
+  while (n > 0n) { bytes.unshift(Number(n % 256n)); n /= 256n; }
+  for (const ch of s) { if (ch !== '1') break; bytes.unshift(0); }
+  return Uint8Array.from(bytes);
+}
+
+// A phone wallet over WalletConnect: QR code on desktop, wallet list or link on phones.
+async function connectWalletConnect() {
+  const [{ SignClient }, { WalletConnectModal }] = await Promise.all([
+    import('https://esm.sh/@walletconnect/sign-client@2.17.2'),
+    import('https://esm.sh/@walletconnect/modal@2.7.0'),
+  ]);
+  const client = await SignClient.init({
+    projectId: WALLETCONNECT_PROJECT_ID,
+    metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: location.origin, icons: [new URL('icon.png', location.href).href] },
+  });
+  const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
+  const { uri, approval } = await client.connect({
+    requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },
+  });
+  if (uri) modal.openModal({ uri });
+  let session;
+  try {
+    session = await approval();
+  } finally {
+    modal.closeModal();
+  }
+  const address = session.namespaces.solana.accounts[0].split(':')[2];
+  const pk = new S.PublicKey(address);
+  wallet = {
+    name: session.peer.metadata.name,
+    signTransaction: async (tx) => {
+      const res = await client.request({
+        topic: session.topic, chainId: WC_SOLANA,
+        request: { method: 'solana_signTransaction', params: { transaction: b64(tx.serialize()) } },
+      });
+      if (res.transaction) return S.VersionedTransaction.deserialize(Uint8Array.from(atob(res.transaction), (c) => c.charCodeAt(0)));
+      tx.addSignature(pk, base58Decode(res.signature));
+      return tx;
+    },
+  };
+  client.on('session_delete', () => setOwner(null));
+  setOwner(pk);
+}
+
 async function connect(silent = false) {
   if (standardWallets.length) return connectStandard(standardWallets[0], silent);
   const p = findInjected();
@@ -306,6 +359,7 @@ function setOwner(pk) {
   $('account').textContent = owner ? `Connected${wallet?.name ? ` (${wallet.name})` : ''}: ${short(owner.toBase58())}` : 'Not connected';
   $('connect').textContent = owner ? 'Connected' : 'Connect Solana wallet';
   $('connect').disabled = !!owner;
+  $('connectQr').hidden = !!owner;
   $('balances').hidden = !owner;
   $('noWallet').hidden = true;
   refreshBalances();
@@ -525,6 +579,7 @@ function loadSaved() {
 // ---------- wire up ----------
 
 $('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
+$('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(e)));
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
 $('amount').oninput = refreshForm;

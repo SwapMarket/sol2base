@@ -19,10 +19,14 @@
     <section class="card">
       <div class="row between">
         <span id="account" class="muted">Not connected</span>
-        <button id="connect">Connect Solana wallet</button>
+        <div class="row">
+          <button id="connectQr" class="ghost" type="button" title="Connect a phone wallet (e.g. Trust Wallet) by scanning a QR code">QR</button>
+          <button id="connect">Connect Solana wallet</button>
+        </div>
       </div>
       <p id="noWallet" class="muted wallet-help" hidden>
-        No Solana wallet found. Install Phantom, Solflare, Backpack or Trust Wallet, or on a phone open this page in the wallet app:
+        No Solana wallet found here. Use <b>QR</b> to connect a phone wallet with WalletConnect (e.g. Trust Wallet; Phantom doesn't support it),
+        install Phantom, Solflare, Backpack or Trust Wallet, or on a phone open this page in the wallet app:
         <a id="openPhantom" href="#">Phantom</a> · <a id="openSolflare" href="#">Solflare</a> · <a id="openTrust" href="#">Trust Wallet</a>
       </p>
       <div id="balances" hidden>
