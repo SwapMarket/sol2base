@@ -390,8 +390,12 @@ async function connectWalletConnect() {
   const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
   const { uri, approval } = await client.connect({
     requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },
-    // The same wallet's Base account, if it has one: recipient, and signer of the EURC swap.
-    optionalNamespaces: { eip155: { chains: ['eip155:8453'], methods: ['eth_sendTransaction'], events: ['accountsChanged', 'chainChanged'] } },
+    optionalNamespaces: {
+      // Lets the wallet broadcast single-signer transactions itself (see sendWatched).
+      solana: { chains: [WC_SOLANA], methods: ['solana_signAndSendTransaction'], events: [] },
+      // The same wallet's Base account, if it has one: recipient, and signer of the EURC swap.
+      eip155: { chains: ['eip155:8453'], methods: ['eth_sendTransaction'], events: ['accountsChanged', 'chainChanged'] },
+    },
   });
   if (uri) modal.openModal({ uri });
   let session;
@@ -413,6 +417,13 @@ async function connectWalletConnect() {
       tx.addSignature(pk, base58Decode(res.signature));
       return tx;
     },
+    // Only if the wallet approved it; resolves to the signature once the wallet has sent it.
+    signAndSend: session.namespaces.solana.methods.includes('solana_signAndSendTransaction')
+      ? async (tx) => (await client.request({
+        topic: session.topic, chainId: WC_SOLANA,
+        request: { method: 'solana_signAndSendTransaction', params: { transaction: b64(tx.serialize()) } },
+      })).signature
+      : null,
   };
   client.on('session_delete', () => { setOwner(null); setEvm(null); });
   setOwner(pk);
@@ -515,6 +526,46 @@ async function signAndSend(tx, lastValidBlockHeight, label, extraSigners = []) {
   }
 }
 
+// For single-signer transactions over WalletConnect: let the wallet sign and send, and watch the chain
+// for the result, since the wallet's reply (the signature) can get lost on the way back. check()
+// returns true once the transaction's effect is visible. Throws if it expires without landing.
+async function sendWatched(tx, lastValidBlockHeight, label, check) {
+  const slow = setTimeout(() => setStatus(`Still waiting for ${wallet?.name ?? 'the wallet'} to send the ${label.toLowerCase()}. Keep the wallet app open; this page also watches Solana and moves on when it lands.`), 60_000);
+  let watching = true;
+  const sent = wallet.signAndSend(tx).then((sig) => { if (watching) setStatus(`${label} sent ${solTx(sig)}, waiting for confirmation…`); return sig; });
+  sent.catch(() => {}); // a rejection still reaches the race below
+  const seen = (async () => {
+    while (watching) {
+      await sleep(3000);
+      try {
+        if (await check()) return true;
+        if ((await rpc('getBlockHeight', [{ commitment: 'confirmed' }])) > lastValidBlockHeight) {
+          throw new Error(`${label} expired before it landed; nothing was spent. Click Bridge to try again.`);
+        }
+      } catch (e) {
+        if (/expired/.test(e.message)) throw e;
+        console.warn('chain watch failed', e);
+      }
+    }
+    return new Promise(() => {});
+  })();
+  try {
+    // A returned signature isn't enough: wait until the effect is on chain too.
+    await Promise.race([sent.then(async () => { while (!(await check())) await sleep(2000); }), seen]);
+  } finally {
+    watching = false;
+    clearTimeout(slow);
+  }
+}
+
+// WalletConnect gives up on a request after 5 minutes without a reply from the wallet.
+function explain(e) {
+  const m = errMsg(e);
+  return /request expired/i.test(m)
+    ? `${wallet?.name ?? 'The wallet'} didn't send its reply back in time, so the request expired. Nothing was sent. Click Bridge to try again, and keep the wallet app open until this page moves on.`
+    : m;
+}
+
 // ---------- flow ----------
 
 // Swap USDT → USDC with Jupiter after checking the swap by simulation. Resolves to the USDC received.
@@ -529,8 +580,10 @@ async function swapUsdtToUsdc(amountIn) {
   await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut);
   const before = tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
   setStatus(`Confirm the swap of ${fmt(amountIn)} USDT for about ${fmt(BigInt(quote.outAmount))} USDC ${inWallet()}…`);
-  await signAndSend(tx, lastValidBlockHeight, 'Swap');
-  const after = tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
+  const usdcNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
+  if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await usdcNow()) >= before + minOut);
+  else await signAndSend(tx, lastValidBlockHeight, 'Swap');
+  const after = await usdcNow();
   const received = after - before;
   if (received <= 0n) throw new Error('The swap delivered no USDC');
   setStep('swapIn', 'done');
@@ -594,7 +647,7 @@ async function bridge() {
     await finish(await track(sig, mode), source, out, eurcTo, topUp);
   } catch (e) {
     console.error(e);
-    setStatus(errMsg(e), 'err');
+    setStatus(explain(e), 'err');
     // Stopped after the USDT swap but before the burn: set the form to bridge that USDC.
     if (unburned) {
       document.querySelector('input[name=src][value=USDC]').checked = true;

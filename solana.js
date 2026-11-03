@@ -116,7 +116,10 @@ export async function jupiterSwapTx(quote, owner) {
   const res = await fetch(`${JUPITER}/swap`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ quoteResponse: quote, userPublicKey: owner.toBase58(), dynamicComputeUnitLimit: true, prioritizationFeeLamports: 'auto' }),
+    // Jupiter's default compute limit (1.4M). Its "dynamic" limit is measured by simulation with almost no
+    // headroom, so a route that gets slightly costlier before sending fails with "budget exceeded";
+    // the priority fee stays tiny (~0.000003 SOL) either way.
+    body: JSON.stringify({ quoteResponse: quote, userPublicKey: owner.toBase58(), dynamicComputeUnitLimit: false, prioritizationFeeLamports: 'auto' }),
   });
   const { swapTransaction, lastValidBlockHeight, error } = await res.json();
   if (!swapTransaction) throw new Error(error || 'Jupiter could not build the swap');
