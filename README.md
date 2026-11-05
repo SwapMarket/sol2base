@@ -7,7 +7,7 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
 ## Flow
 
 1. **Connect** a Solana wallet: through the Wallet Standard (Phantom, Solflare, Backpack, Trust Wallet…), the wallets' older
-   injected objects as a fallback, or **QR** for a phone wallet over WalletConnect (`solana_signTransaction`; e.g. Trust Wallet,
+   injected objects as a fallback, or **WalletConnect** for a phone wallet by QR code (`solana_signTransaction`; e.g. Trust Wallet,
    not Phantom). On phones, the page can also be opened in Phantom's, Solflare's or Trust Wallet's in-app browser.
 2. **Optional, pay with USDT**: swap USDT → USDC on Solana via Jupiter's API. Before signing, the page simulates Jupiter's
    transaction and checks that exactly the USDT amount leaves and at least the quoted minimum of USDC arrives.
