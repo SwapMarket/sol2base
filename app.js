@@ -531,7 +531,7 @@ const inWallet = () => `in ${wallet?.name && wallet.name !== 'wallet' ? wallet.n
 const inBaseWallet = () => `in ${evm?.name ?? 'your Base wallet'}`;
 
 async function connectBase() {
-  if (!window.ethereum) { alert('No Base (EVM) wallet found in this browser. Use WalletConnect to connect a phone wallet such as Trust Wallet, which covers both Solana and Base.'); return; }
+  if (!window.ethereum) { $('noBaseWallet').hidden = false; return; }
   const w = await B.injectedBaseWallet(window.ethereum);
   setEvm({ ...w, name: window.ethereum.isRabby ? 'Rabby' : window.ethereum.isPhantom ? 'Phantom' : window.ethereum.isMetaMask ? 'MetaMask' : 'your Base wallet' });
   try { localStorage.setItem(BASE_WALLET_KEY, 'injected'); } catch {}
@@ -542,6 +542,7 @@ function setEvm(e) {
   evm = e;
   $('evmAccount').textContent = evm ? `Base wallet (${evm.name}): ${short(evm.address)}` : 'Base wallet: not connected (needed for EURC)';
   $('connectBase').hidden = !!evm;
+  if (evm) $('noBaseWallet').hidden = true;
   $('baseBalances').hidden = !evm;
   refreshBaseBalances();
 }

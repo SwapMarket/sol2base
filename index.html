@@ -40,6 +40,10 @@
         <span id="evmAccount" class="muted">Base wallet: not connected (needed for EURC)</span>
         <button id="connectBase" class="ghost" type="button" title="Rabby, MetaMask, Phantom… — or use WalletConnect above, which connects Base too">Connect Base wallet</button>
       </div>
+      <p id="noBaseWallet" class="muted wallet-help" hidden>
+        No Base wallet found here. Use <b>WalletConnect</b> above to connect a phone wallet by QR code (e.g. Trust Wallet, which covers
+        both Solana and Base), or install Rabby, MetaMask or Phantom.
+      </p>
       <div id="baseBalances" hidden>
         <div class="bal"><span class="chain">Base</span><span class="vals"><span><b id="balBaseUsdc">–</b> USDC</span><span><b id="balEurc">–</b> EURC</span><span><b id="gasBase">–</b> ETH gas</span></span></div>
         <button id="sweep" class="ghost sweep" type="button" hidden>Swap all Base USDC to EURC</button>
