@@ -33,6 +33,12 @@ body {
 main { max-width: 520px; margin: 0 auto; padding: 40px 16px; }
 h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
 .sub { margin: 6px 0 24px; color: var(--muted); }
+.sub { margin-bottom: 14px; }
+.dir { display: flex; margin: 0 0 20px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
+.dir label { flex: 1; margin: 0; text-align: center; padding: 9px 8px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--muted); }
+.dir label:has(input:checked) { background: var(--accent); color: #fff; }
+.dir label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -4px; }
+.dir input { position: absolute; opacity: 0; pointer-events: none; }
 
 .card {
   background: var(--card);

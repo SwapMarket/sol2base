@@ -13,6 +13,7 @@ const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC
 const LAMPORTS = { eventRent: 2_990_000n, fees: 100_000n, swap: 600_000n, usdcAccount: 2_040_000n };
 const PENDING_KEY = 'sol2base:pendingBurn';
 const RECIPIENT_KEY = 'sol2base:recipient';
+const RECIPIENT_SOL_KEY = 'sol2base:recipientSol'; // Solana recipient for Base → Solana
 // Burns made from this browser (or found in recent history), per Solana owner: { [owner]: [{ sig, event }] }.
 // The public RPCs can't search old history or list accounts by owner, so the page remembers them to
 // reclaim the message-account rent after 5 days.
@@ -33,7 +34,12 @@ const WC_SOLANA = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
 const $ = (id) => document.getElementById(id);
 let wallet = null; // { name, signTransaction(VersionedTransaction) → VersionedTransaction }
 let owner = null; // PublicKey
-let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
+// Per route: { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units. toSolSetup
+// is Base → Solana when Circle also creates the recipient's USDC account (its rent is in the fee).
+let allFees = null; // { toBase, toSol, toSolSetup }
+// Base → Solana recipient: { addr, needsAccount (no USDC account yet), tokenAccount (the address is itself
+// a token account, not a wallet) }, or { addr, pending } while it's being looked up.
+let solDest = null;
 let bal = null; // { usdc, usdt, sol, usdcAccount }: base units, lamports, whether the USDC account exists
 let busy = false; // a transfer started from the form is in progress
 let evm = null; // Base wallet { address, wallet, ensureBase, name }: needed for EURC (it signs the swap)
@@ -55,7 +61,8 @@ const baseTx = B.baseTx;
 const fmtEth = (v) => (Number(v) / 1e18).toLocaleString(undefined, { maximumSignificantDigits: 4 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
-const errMsg = (e) => e?.message || String(e);
+const errMsg = (e) => e?.shortMessage || e?.message || String(e);
+const currentDir = () => document.querySelector('input[name=dir]:checked').value;
 const currentMode = () => document.querySelector('input[name=mode]:checked').value;
 const currentSrc = () => document.querySelector('input[name=src]:checked').value;
 const currentOut = () => document.querySelector('input[name=out]:checked').value;
@@ -74,6 +81,35 @@ function recipient() {
   const v = $('recipient').value.trim();
   if (!v) return evm?.address ?? null;
   return isAddress(v) ? getAddress(v) : null;
+}
+
+// The Solana wallet entered, else the connected Solana wallet (Base → Solana).
+function solRecipient() {
+  const v = $('recipientSol').value.trim();
+  if (!v) return owner;
+  try {
+    const pk = new S.PublicKey(v);
+    return pk.toBase58() === v ? pk : null;
+  } catch { return null; }
+}
+
+// Fees for the selected route (Base → Solana: with account creation when the recipient needs it).
+function feesFor(all = allFees, dest = solDest) {
+  if (!all) return null;
+  if (currentDir() === 'toBase') return all.toBase;
+  return dest?.needsAccount ? all.toSolSetup : all.toSol;
+}
+
+// Look up whether a Solana recipient has a USDC account, and that it isn't itself a token account.
+async function lookupSolDest(pk) {
+  const { value: [acct, usdcAcct] } = await rpc('getMultipleAccounts', [[pk.toBase58(), S.ata(pk, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }]);
+  return { addr: pk.toBase58(), needsAccount: !usdcAcct, tokenAccount: acct?.owner === S.TOKEN_PROGRAM_ID.toBase58() };
+}
+function checkSolDest(pk) {
+  if (solDest?.addr === pk.toBase58()) return;
+  solDest = { addr: pk.toBase58(), pending: true };
+  lookupSolDest(pk).then((d) => { if (solDest?.addr === d.addr) { solDest = d; refreshForm(); } })
+    .catch((e) => { console.warn('recipient lookup', e); if (solDest?.addr === pk.toBase58()) solDest = null; });
 }
 
 let rpcIndex = 0;
@@ -155,14 +191,17 @@ function tickSteps() {
   }
 }
 setInterval(tickSteps, 1000);
-function resetSteps() {
+function resetSteps(dir = currentDir()) {
   for (const li of document.querySelectorAll('#steps li')) {
     li.className = '';
     li.hidden = false;
     li.querySelector('.elapsed')?.remove();
   }
-  document.querySelector('#steps li[data-step="swapIn"]').hidden = currentSrc() !== 'USDT';
-  document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
+  const toSol = dir === 'toSol';
+  document.querySelector('#steps .src-chain').textContent = toSol ? 'Base' : 'Solana';
+  document.querySelector('#steps .dst-chain').textContent = toSol ? 'Solana' : 'Base';
+  document.querySelector('#steps li[data-step="swapIn"]').hidden = toSol || currentSrc() !== 'USDT';
+  document.querySelector('#steps li[data-step="swap"]').hidden = toSol || currentOut() !== 'EURC';
   $('retrySwap').hidden = true;
   pendingSwap = null;
   $('progress').hidden = false;
@@ -172,13 +211,21 @@ function resetSteps() {
 
 async function loadFees() {
   try {
-    const list = await (await fetch(`${IRIS}/v2/burn/USDC/fees/${S.DOMAIN_SOLANA}/${S.DOMAIN_BASE}?forward=true`)).json();
-    const pick = (threshold) => {
-      const f = list.find((x) => x.finalityThreshold === threshold);
-      if (!f?.forwardFee) throw new Error('missing forward fee');
-      return { bps: f.minimumFee, forward: BigInt(f.forwardFee.high) };
+    const route = async (from, to, extra = '') => {
+      const list = await (await fetch(`${IRIS}/v2/burn/USDC/fees/${from}/${to}?forward=true${extra}`)).json();
+      const pick = (threshold) => {
+        const f = list.find((x) => x.finalityThreshold === threshold);
+        if (!f?.forwardFee) throw new Error('missing forward fee');
+        return { bps: f.minimumFee, forward: BigInt(f.forwardFee.high) };
+      };
+      return { fast: pick(FINALITY.fast), standard: pick(FINALITY.standard) };
     };
-    fees = { fast: pick(FINALITY.fast), standard: pick(FINALITY.standard) };
+    const [toBase, toSol, toSolSetup] = await Promise.all([
+      route(S.DOMAIN_SOLANA, S.DOMAIN_BASE),
+      route(S.DOMAIN_BASE, S.DOMAIN_SOLANA),
+      route(S.DOMAIN_BASE, S.DOMAIN_SOLANA, '&includeRecipientSetup=true'),
+    ]);
+    allFees = { toBase, toSol, toSolSetup };
   } catch (e) {
     console.warn('fee fetch failed', e);
     refreshForm();
@@ -190,7 +237,7 @@ async function loadFees() {
 
 // Max total fee (CCTP protocol fee + Circle forwarding fee, "high" tier) in USDC base units.
 // Circle charges the full maxFee when forwarding; it is deducted from the burned amount on Base.
-function maxFeeFor(amount, mode, f = fees) {
+function maxFeeFor(amount, mode, f = feesFor()) {
   const { bps, forward } = f[mode];
   return (amount * BigInt(Math.ceil(bps * 100)) + 999_999n) / 1_000_000n + forward;
 }
@@ -271,6 +318,14 @@ function refreshForm() {
   else if (!topUpTouched && baseBal) $('topUp').checked = baseBal.eth < TOPUP_BELOW_SWAPS * swapGas;
   if (topUpEth) $('topUpEth').textContent = `about ${fmtEth(topUpEth)} ETH`;
   $('topUpRow').hidden = currentOut() !== 'EURC';
+
+  const dir = currentDir();
+  for (const el of document.querySelectorAll('[data-dir]')) el.hidden = el.dataset.dir !== dir;
+  $('recipientLabel').htmlFor = dir === 'toSol' ? 'recipientSol' : 'recipient';
+  if (!evm) $('evmAccount').textContent = `Base wallet: not connected (needed ${dir === 'toSol' ? 'to send from Base' : 'for EURC'})`;
+  $('stdTime').textContent = dir === 'toSol' ? 'about 15–20 minutes on Base' : 'about half a minute on Solana';
+  if (dir === 'toSol') { refreshFormToSol(); return; }
+
   const topUp = topUpOn() ? B.TOPUP_USDC : 0n;
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
   $('recipient').placeholder = evm ? `defaults to your Base wallet ${short(evm.address)}` : '0x… your Base (EVM) address';
@@ -295,15 +350,15 @@ function refreshForm() {
   }
 
   for (const mode of ['fast', 'standard']) {
-    const fee = fees ? maxFeeFor(usdc ?? 0n, mode) : null;
+    const fee = allFees ? maxFeeFor(usdc ?? 0n, mode) : null;
     $(mode === 'fast' ? 'feeFast' : 'feeStd').textContent = fee === null ? ''
       : `· fee ≤ ${fmt(fee + (src === 'USDT' ? USDT_FEE_TOLERANCE : 0n))} USDC`;
   }
 
   let label = 'Bridge to Base';
-  let ok = !!owner && !!amt && !!fees && !!recipient();
+  let ok = !!owner && !!amt && !!allFees && !!recipient();
   let receive = '';
-  if (!fees) {
+  if (!allFees) {
     label = 'Loading fees…';
   } else if (amt && !usdc) {
     ok = false;
@@ -341,6 +396,58 @@ function refreshForm() {
   }
   if (owner && amt && !recipient()) label = $('recipient').value.trim() ? 'Recipient is not a valid Base address' : 'Enter the Base recipient';
   if (solWarn !== $('solWarn').textContent) $('solWarn').textContent = solWarn;
+  $('bridge').disabled = !ok;
+  $('bridge').textContent = label;
+}
+
+// The form for Base → Solana: USDC from the connected Base wallet to a Solana wallet.
+function refreshFormToSol() {
+  const typed = $('recipientSol').value.trim();
+  const dest = solRecipient();
+  if (dest) checkSolDest(dest);
+  const d = dest && solDest?.addr === dest.toBase58() && !solDest.pending ? solDest : null;
+  $('recipientLabel').textContent = 'Recipient on Solana';
+  $('recipientSol').placeholder = owner ? `defaults to your Solana wallet ${short(owner.toBase58())}` : 'your Solana wallet address';
+  const who = !dest ? ''
+    : !typed ? `Using your connected Solana wallet (${wallet?.name ?? 'wallet'}).`
+      : owner && dest.equals(owner) ? `This is your connected Solana wallet (${wallet?.name ?? 'wallet'}).`
+        : 'Make sure you control this address on Solana.';
+  const setupFee = allFees ? allFees.toSolSetup[currentMode()].forward - allFees.toSol[currentMode()].forward : 0n;
+  const account = !d ? ''
+    : d.tokenAccount ? ' This is a token account, not a wallet: enter the wallet address.'
+      : d.needsAccount ? ` It has no USDC account yet: Circle creates one, which adds about ${fmt(setupFee)} USDC to the fee. No SOL needed.` : '';
+  $('recipientHint').textContent = who + account;
+  $('amountLabel').textContent = 'Amount (USDC)';
+
+  const amt = parseAmount();
+  for (const mode of ['fast', 'standard']) {
+    $(mode === 'fast' ? 'feeFast' : 'feeStd').textContent = allFees ? `· fee ≤ ${fmt(maxFeeFor(amt ?? 0n, mode, feesFor(allFees, d)))} USDC` : '';
+  }
+
+  let label = 'Bridge to Solana';
+  let ok = false;
+  let receive = '';
+  let warn = '';
+  const gas = baseBal ? B.GAS_UNITS.burn * baseBal.gasPrice : 0n;
+  if (!allFees) label = 'Loading fees…';
+  else if (!evm) label = 'Connect a Base wallet';
+  else if (!amt) label = 'Enter an amount';
+  else if (!dest) label = typed ? 'Recipient is not a valid Solana address' : 'Enter the Solana recipient';
+  else if (!d) label = 'Checking the recipient on Solana…';
+  else if (d.tokenAccount) label = 'Enter a wallet address, not a token account';
+  else {
+    const fee = maxFeeFor(amt, currentMode(), feesFor(allFees, d));
+    if (amt <= fee) label = 'Amount must be larger than the fee';
+    else if (baseBal && amt > baseBal.usdc) label = 'Insufficient USDC on Base';
+    else if (baseBal && baseBal.eth < gas) {
+      label = 'Not enough ETH on Base';
+      warn = `This needs about ${fmtEth(gas)} ETH on Base for gas; you have ${fmtEth(baseBal.eth)}.`;
+    } else ok = !!baseBal;
+    if (amt > fee) receive = `You receive at least ${fmt(amt - fee)} USDC on Solana${d.needsAccount ? ', in a USDC account Circle creates for the recipient' : ''}`;
+  }
+  if (receive !== $('receive').textContent) $('receive').textContent = receive;
+  shownQuoteKey = null;
+  if (warn !== $('solWarn').textContent) $('solWarn').textContent = warn;
   $('bridge').disabled = !ok;
   $('bridge').textContent = label;
 }
@@ -661,7 +768,7 @@ async function bridge() {
   const to = out === 'EURC' ? evm.address : recipient();
   const eurcTo = out === 'EURC' ? recipient() : null;
   const topUp = topUpOn();
-  if (!amount || !fees || !to || !owner) return;
+  if (!amount || !allFees || !to || !owner) return;
   const src = currentSrc();
   const shownUsdc = src === 'USDT' ? (usdtQuote?.key === amount && !usdtQuote.error ? BigInt(usdtQuote.quote.outAmount) : null) : amount;
   if (!shownUsdc) return;
@@ -672,7 +779,7 @@ async function bridge() {
   $('bridge').disabled = true;
   resetSteps();
   busy = true;
-  const shownFees = fees;
+  const shownFees = allFees.toBase;
   let source = null; // { amount } when the transfer started from USDT
   let unburned = null; // USDC from the USDT swap that hasn't been burned yet
   try {
@@ -688,7 +795,7 @@ async function bridge() {
     // Never charge more than the fee the user saw (plus the USDT tolerance): if it went up, stop.
     const allowedFee = maxFeeFor(amount, mode, shownFees) + (source ? USDT_FEE_TOLERANCE : 0n);
     if (!(await loadFees())) throw new Error('Could not load current fees from Circle. Try again.');
-    const maxFee = maxFeeFor(amount, mode);
+    const maxFee = maxFeeFor(amount, mode, allFees.toBase);
     if (maxFee > allowedFee) {
       throw new Error(`${source ? `Swapped to ${fmt(amount)} USDC. ` : ''}Circle's fee just went up from ${fmt(allowedFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
     }
@@ -723,14 +830,83 @@ async function bridge() {
   }
 }
 
+// Base → Solana: burn on Base with the forwarding hook; Circle mints on Solana (creating the
+// recipient's USDC account first if needed, paid from its fee).
+async function bridgeToSolana() {
+  const amount = parseAmount();
+  const dest = solRecipient();
+  if (!amount || !allFees || !dest || !evm) return;
+  await askNotifications();
+  const mode = currentMode();
+  try { if ($('recipientSol').value.trim()) localStorage.setItem(RECIPIENT_SOL_KEY, dest.toBase58()); } catch {}
+  const shownFee = maxFeeFor(amount, mode, feesFor(allFees, solDest));
+
+  $('bridge').disabled = true;
+  resetSteps('toSol');
+  busy = true;
+  try {
+    setStep('burn', 'active');
+    setStatus('Checking the recipient and the current fee…');
+    // The account may have been created (or closed) since the form looked; decide on what's there now.
+    const [d] = await Promise.all([lookupSolDest(dest), loadFees().then((ok) => { if (!ok) throw new Error('Could not load current fees from Circle. Try again.'); })]);
+    if (d.tokenAccount) throw new Error('The recipient is a token account, not a wallet. Enter the wallet address.');
+    const maxFee = maxFeeFor(amount, mode, feesFor(allFees, d));
+    if (maxFee > shownFee) throw new Error(`Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
+    if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
+
+    const hash = await B.burnUsdc({
+      signer: evm, amount, destinationDomain: S.DOMAIN_SOLANA, mintRecipient: S.usdcMintRecipient(dest),
+      maxFee, minFinalityThreshold: FINALITY[mode], hookData: S.solanaForwardHook(dest, d.needsAccount),
+      setStatus, inWallet: inBaseWallet,
+    });
+    savePending({ sig: hash, dir: 'toSol', to: dest.toBase58() });
+    setStep('burn', 'done');
+    refreshBaseBalances();
+    finishToSol(await track(hash, mode, 'toSol'), dest.toBase58());
+  } catch (e) {
+    console.error(e);
+    setStatus(explain(e), 'err');
+  } finally {
+    busy = false;
+    refreshForm();
+  }
+}
+
+function finishToSol(m, to) {
+  clearPending();
+  refreshBalances();
+  refreshBaseBalances();
+  solDest = null; // the recipient now has a USDC account
+  const link = solTx(m.forwardTxHash);
+  const body = m.decodedMessage?.decodedMessageBody;
+  if (!body?.amount) { setStatus(`Done! USDC minted on Solana ${link}.`, 'ok'); return; }
+  const burned = BigInt(body.amount);
+  const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
+  const account = new S.PublicKey(Uint8Array.from(body.mintRecipient.replace(/^0x/, '').match(/../g), (h) => parseInt(h, 16))).toBase58();
+  const forWhom = to ? `for ${short(to)}` : `in USDC account ${short(account)}`;
+  setStatus(`Done! ${fmt(burned)} USDC → ${fmt(burned - fee)} USDC on Solana ${forWhom} ${link}. Circle's fee: ${fmt(fee)} USDC.`, 'ok');
+}
+
 async function resume() {
   const sig = $('resumeSig').value.trim();
-  if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(sig)) { alert('Enter a valid Solana transaction signature.'); return; }
-  await askNotifications();
-  resetSteps();
-  setStep('burn', 'done');
   const saved = loadPending();
   const same = saved?.sig === sig;
+  if (/^0x[0-9a-fA-F]{64}$/.test(sig)) {
+    await askNotifications();
+    resetSteps('toSol');
+    setStep('burn', 'done');
+    try {
+      finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null);
+    } catch (e) {
+      console.error(e);
+      setStatus(errMsg(e), 'err');
+    }
+    return;
+  }
+  if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(sig)) { $('resumeSig').setCustomValidity('Enter a Solana transaction signature or a Base transaction hash (0x…).'); $('resumeSig').reportValidity(); return; }
+  await askNotifications();
+  resetSteps('toBase');
+  setStep('burn', 'done');
   try {
     await finish(await track(sig), null, same ? saved.out : currentOut(), same ? saved.eurcTo : recipient(), same ? saved.topUp : topUpOn());
   } catch (e) {
@@ -739,12 +915,14 @@ async function resume() {
   }
 }
 
-// Poll Circle until the forwarder has minted on Base. Resolves to the message.
-async function track(sig, mode) {
+// Poll Circle until the forwarder has minted on the other chain. Resolves to the message.
+async function track(sig, mode, dir = 'toBase') {
+  const toSol = dir === 'toSol';
+  const [srcDomain, dstDomain, dstName] = toSol ? [S.DOMAIN_BASE, S.DOMAIN_SOLANA, 'Solana'] : [S.DOMAIN_SOLANA, S.DOMAIN_BASE, 'Base'];
   setStep('attest', 'active');
-  const wait = mode === 'fast' ? 'usually a few seconds' : mode === 'standard' ? 'usually under a minute' : 'this can take a while';
-  setStatus(`Waiting for Circle to attest the burn (${wait}). You can close this page and resume later with ${solTx(sig)}.`);
-  const url = `${IRIS}/v2/messages/${S.DOMAIN_SOLANA}?transactionHash=${sig}`;
+  const wait = mode === 'fast' ? 'usually a few seconds' : mode === 'standard' ? (toSol ? 'usually 15–20 minutes, while Base finalizes' : 'usually under a minute') : 'this can take a while';
+  setStatus(`Waiting for Circle to attest the burn (${wait}). You can close this page and resume later with ${toSol ? baseTx(sig) : solTx(sig)}.`);
+  const url = `${IRIS}/v2/messages/${srcDomain}?transactionHash=${sig}`;
   let attested = false;
   for (;;) {
     let m = null;
@@ -755,7 +933,7 @@ async function track(sig, mode) {
     } catch (e) {
       console.warn('attestation poll failed', e);
     }
-    if (m?.decodedMessage && Number(m.decodedMessage.destinationDomain) !== S.DOMAIN_BASE) throw new Error('This burn is not destined for Base.');
+    if (m?.decodedMessage && Number(m.decodedMessage.destinationDomain) !== dstDomain) throw new Error(`This burn is not destined for ${dstName}.`);
     if (m?.forwardTxHash) {
       for (const s of ['attest', 'mint']) setStep(s, 'done');
       return m;
@@ -764,7 +942,7 @@ async function track(sig, mode) {
       attested = true;
       setStep('attest', 'done');
       setStep('mint', 'active');
-      setStatus('Attested. Waiting for Circle to mint on Base…');
+      setStatus(`Attested. Waiting for Circle to mint on ${dstName}…`);
     }
     await sleep(4000);
   }
@@ -958,7 +1136,7 @@ function saveForm() {
   const v = (name) => document.querySelector(`input[name=${name}]:checked`).value;
   try {
     localStorage.setItem(FORM_KEY, JSON.stringify({
-      src: v('src'), amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
+      dir: v('dir'), src: v('src'), amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
     }));
   } catch {}
 }
@@ -967,6 +1145,7 @@ function loadForm() {
     const f = JSON.parse(localStorage.getItem(FORM_KEY) ?? 'null');
     if (!f) return;
     const pick = (name, value) => { const el = document.querySelector(`input[name=${name}][value="${value}"]`); if (el) el.checked = true; };
+    pick('dir', f.dir);
     pick('src', f.src);
     pick('mode', f.mode);
     if (f.amount) $('amount').value = f.amount;
@@ -983,9 +1162,12 @@ function loadSaved() {
       $('resumeSig').value = p.sig;
       $('resumeSig').closest('details').open = true;
       if (p.out === 'EURC') preferredOut = 'EURC';
+      if (p.dir === 'toSol') document.querySelector('input[name=dir][value=toSol]').checked = true;
     }
     const to = localStorage.getItem(RECIPIENT_KEY);
     if (to) $('recipient').value = to;
+    const toSol = localStorage.getItem(RECIPIENT_SOL_KEY);
+    if (toSol) $('recipientSol').value = toSol;
   } catch {}
 }
 
@@ -998,21 +1180,28 @@ $('retrySwap').onclick = swapToEurc;
 $('sweep').onclick = sweep;
 $('reclaim').onclick = reclaim;
 $('topUp').onchange = () => { topUpTouched = true; refreshForm(); saveForm(); };
-$('bridge').onclick = bridge;
+$('bridge').onclick = () => (currentDir() === 'toSol' ? bridgeToSolana() : bridge());
 $('resume').onclick = resume;
 $('amount').oninput = () => { refreshForm(); saveForm(); };
+$('recipientSol').oninput = () => {
+  refreshForm();
+  const r = $('recipientSol').value.trim();
+  try { if (!r) localStorage.removeItem(RECIPIENT_SOL_KEY); else if (solRecipient()) localStorage.setItem(RECIPIENT_SOL_KEY, r); } catch {}
+};
+$('resumeSig').oninput = () => $('resumeSig').setCustomValidity('');
 $('recipient').oninput = () => {
   refreshForm();
   const r = $('recipient').value.trim();
   try { if (!r) localStorage.removeItem(RECIPIENT_KEY); else if (isAddress(r)) localStorage.setItem(RECIPIENT_KEY, getAddress(r)); } catch {}
 };
 $('max').onclick = () => {
-  if (!bal) return;
-  $('amount').value = (Number(currentSrc() === 'USDT' ? bal.usdt : bal.usdc) / 1e6).toString();
+  const max = currentDir() === 'toSol' ? baseBal?.usdc : bal && (currentSrc() === 'USDT' ? bal.usdt : bal.usdc);
+  if (max === undefined || max === null) return;
+  $('amount').value = (Number(max) / 1e6).toString();
   refreshForm();
   saveForm();
 };
-for (const r of document.querySelectorAll('input[name=mode], input[name=src], input[name=out]')) {
+for (const r of document.querySelectorAll('input[name=dir], input[name=mode], input[name=src], input[name=out]')) {
   r.onchange = () => {
     if (r.name === 'out') preferredOut = r.value;
     refreshForm();

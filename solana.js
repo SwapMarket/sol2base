@@ -39,6 +39,27 @@ const EVENT_AUTHORITY = pda(['__event_authority'], TOKEN_MESSENGER_MINTER);
 export const ata = (owner, mint) =>
   PublicKey.findProgramAddressSync([owner.toBytes(), TOKEN_PROGRAM.toBytes(), mint.toBytes()], ATA_PROGRAM)[0];
 
+// ---------- Base → Solana ----------
+
+export const TOKEN_PROGRAM_ID = TOKEN_PROGRAM;
+const hex = (bytes) => '0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+// CCTP mints to a token account, not a wallet: the recipient's USDC associated token account, as bytes32.
+export const usdcMintRecipient = (owner) => hex(ata(owner, USDC_MINT).toBytes());
+
+// Forwarding hook for a Solana destination. With createAccount, Circle creates the recipient's USDC
+// account before minting (it checks that the mint recipient is that owner's account) and charges the
+// rent in its fee: "cctp-forward" (24 bytes), version 0, length 33 (big-endian u32s), 0x01, owner (32).
+export function solanaForwardHook(owner, createAccount) {
+  if (!createAccount) return hex(FORWARD_HOOK);
+  const out = new Uint8Array(32 + 1 + 32);
+  out.set(FORWARD_HOOK, 0);
+  new DataView(out.buffer).setUint32(28, 33, false);
+  out[32] = 1;
+  out.set(owner.toBytes(), 33);
+  return hex(out);
+}
+
 // 20-byte EVM address → 32-byte CCTP recipient.
 function evmToBytes32(address) {
   const out = new Uint8Array(32);

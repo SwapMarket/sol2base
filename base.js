@@ -12,6 +12,7 @@ import {
   parseEventLogs,
   encodeFunctionData,
   getAddress,
+  zeroHash,
 } from 'https://esm.sh/viem@2.21.55';
 import { base } from 'https://esm.sh/viem@2.21.55/chains';
 
@@ -25,8 +26,10 @@ const AERO_TICK_SPACINGS = [1, 50];
 const AERO_WETH_TICK_SPACINGS = [100, 1, 2000];
 export const TOPUP_USDC = 200_000n; // 0.20 USDC
 const SLIPPAGE_BPS = 50n; // 0.5%
-// Approve + swap ~280k gas; the top-up adds ~120k.
-export const GAS_UNITS = { swap: 320_000n, topUp: 150_000n };
+// Approve + swap ~280k gas; the top-up adds ~120k. Approve + CCTP burn (to Solana) ~200k.
+export const GAS_UNITS = { swap: 320_000n, topUp: 150_000n, burn: 250_000n };
+// Circle CCTP V2 TokenMessengerV2 (same address on every EVM chain).
+const TOKEN_MESSENGER = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d';
 // Wallets price Base gas a little above the network (Rabby ~1.5x); used for warnings.
 export const WALLET_MIN_GAS_PRICE = 15_000_000n; // 0.015 gwei
 
@@ -44,6 +47,10 @@ const routerAbi = parseAbi([
   'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
   'function multicall(bytes[] data) payable returns (bytes[] results)',
 ]);
+const tokenMessengerAbi = parseAbi([
+  'function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData)',
+]);
+const depositForBurnEvent = parseAbiItem('event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)');
 const transferEvent = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 const wethWithdrawalEvent = parseAbiItem('event Withdrawal(address indexed src, uint256 wad)');
 
@@ -230,4 +237,45 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
     .filter((l) => l.address.toLowerCase() === WETH_BASE.toLowerCase())
     .reduce((sum, l) => sum + l.args.wad, 0n);
   return { amountIn, eurcOut, ethOut, topUp, hash: r.transactionHash };
+}
+
+// ---------- CCTP burn (Base → Solana) ----------
+
+// Burn `amount` USDC from the signer for minting on `destinationDomain` to `mintRecipient` (bytes32 hex),
+// with Circle's forwarding hook so Circle mints on the other chain. Approves TokenMessengerV2 first if
+// needed and simulates the burn before asking the wallet. Resolves to the burn transaction hash.
+export async function burnUsdc({ signer, amount, destinationDomain, mintRecipient, maxFee, minFinalityThreshold, hookData, setStatus, inWallet, onApproved }) {
+  const { address: account, wallet } = signer;
+  const balance = await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] });
+  if (balance < amount) throw new Error(`Only ${Number(balance) / 1e6} USDC in the Base wallet.`);
+  if ((await baseClient.getBalance({ address: account })) === 0n) {
+    throw new Error('You need a little ETH on Base to pay gas for the burn. Add some ETH to the Base wallet and retry.');
+  }
+  await signer.ensureBase();
+
+  const allowance = () => baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER] });
+  if ((await allowance()) < amount) {
+    setStatus(`Confirm the USDC approval for Circle's TokenMessenger ${inWallet()}…`);
+    await sendWatched({
+      account, label: 'Approval', setStatus,
+      send: () => wallet.writeContract({ account, address: USDC_BASE, abi: erc20Abi, functionName: 'approve', args: [TOKEN_MESSENGER, amount] }),
+      check: async () => (await allowance()) >= amount,
+    });
+    // Wallets simulate before showing a transaction; one whose node is a block behind says it "will fail".
+    await waitBlocks(2);
+  }
+  onApproved?.();
+
+  const args = [amount, destinationDomain, mintRecipient, USDC_BASE, zeroHash, maxFee, minFinalityThreshold, hookData];
+  // Fails here (with the contract's reason) rather than in the wallet.
+  await baseClient.simulateContract({ account, address: TOKEN_MESSENGER, abi: tokenMessengerAbi, functionName: 'depositForBurnWithHook', args });
+  setStatus(`Confirm the burn of ${Number(amount) / 1e6} USDC ${inWallet()}…`);
+  const fromBlock = await baseClient.getBlockNumber();
+  const r = await sendWatched({
+    account, label: 'Burn', setStatus,
+    send: () => wallet.writeContract({ account, address: TOKEN_MESSENGER, abi: tokenMessengerAbi, functionName: 'depositForBurnWithHook', args }),
+    check: async () => (await baseClient.getLogs({ address: TOKEN_MESSENGER, event: depositForBurnEvent, args: { depositor: account }, fromBlock }))
+      .find((l) => l.args.amount === amount)?.transactionHash,
+  });
+  return r.transactionHash;
 }

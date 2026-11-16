@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>sol2base — USDT/USDC Solana → Base via CCTP</title>
+  <title>sol2base — USDC between Solana and Base via CCTP</title>
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
   <link rel="stylesheet" href="style.css?v=__COMMIT__">
@@ -13,7 +13,12 @@
   <main>
     <header>
       <h1>sol2base</h1>
-      <p class="sub">Move USDC or USDT from Solana to Base with Circle's CCTP V2. You sign on Solana, then Circle mints USDC on Base and takes its fee out of the amount. You need a little SOL, and no ETH on Base.</p>
+      <p class="sub" data-dir="toBase">Move USDC or USDT from Solana to Base with Circle's CCTP V2. You sign on Solana, then Circle mints USDC on Base and takes its fee out of the amount. You need a little SOL, and no ETH on Base.</p>
+      <p class="sub" data-dir="toSol" hidden>Move USDC from Base to Solana with Circle's CCTP V2. You sign on Base, then Circle mints USDC on Solana and takes its fee out of the amount. You need a little ETH on Base, and no SOL.</p>
+      <div class="dir" role="radiogroup" aria-label="Direction">
+        <label><input type="radio" name="dir" value="toBase" checked> Solana → Base</label>
+        <label><input type="radio" name="dir" value="toSol"> Base → Solana</label>
+      </div>
     </header>
 
     <section class="card">
@@ -51,7 +56,7 @@
     </section>
 
     <section class="card">
-      <fieldset class="src">
+      <fieldset class="src" data-dir="toBase">
         <legend>Pay with</legend>
         <label class="radio"><input type="radio" name="src" value="USDC" checked> USDC</label>
         <label class="radio"><input type="radio" name="src" value="USDT"> USDT, swapped to USDC first <span class="muted">· Jupiter</span></label>
@@ -63,7 +68,7 @@
         <button id="max" class="ghost" type="button">Max</button>
       </div>
 
-      <fieldset>
+      <fieldset data-dir="toBase">
         <legend>Receive as</legend>
         <label class="radio"><input type="radio" name="out" value="USDC" checked> USDC</label>
         <label class="radio"><input type="radio" name="out" value="EURC"> EURC, swapped on Aerodrome <span class="muted" id="eurcHint">· needs a connected Base wallet with a little ETH for gas</span></label>
@@ -71,12 +76,13 @@
       </fieldset>
 
       <label for="recipient" id="recipientLabel">Recipient on Base</label>
-      <input id="recipient" type="text" placeholder="0x… your Base (EVM) address" autocomplete="off" spellcheck="false">
+      <input id="recipient" type="text" placeholder="0x… your Base (EVM) address" autocomplete="off" spellcheck="false" data-dir="toBase">
+      <input id="recipientSol" type="text" placeholder="your Solana wallet address" autocomplete="off" spellcheck="false" data-dir="toSol" hidden>
       <p id="recipientHint" class="muted hint"></p>
 
       <fieldset>
         <legend>Speed</legend>
-        <label class="radio"><input type="radio" name="mode" value="standard" checked> Standard (about half a minute on Solana) <span class="muted" id="feeStd"></span></label>
+        <label class="radio"><input type="radio" name="mode" value="standard" checked> <span>Standard (<span id="stdTime">about half a minute on Solana</span>)</span> <span class="muted" id="feeStd"></span></label>
         <label class="radio"><input type="radio" name="mode" value="fast"> Fast (a few seconds) <span class="muted" id="feeFast"></span></label>
       </fieldset>
 
@@ -88,9 +94,9 @@
     <section class="card" id="progress" hidden>
       <ol id="steps">
         <li data-step="swapIn" hidden>Swap USDT to USDC</li>
-        <li data-step="burn">Burn USDC on Solana</li>
+        <li data-step="burn">Burn USDC on <span class="src-chain">Solana</span></li>
         <li data-step="attest">Wait for Circle attestation</li>
-        <li data-step="mint">Circle mints on Base</li>
+        <li data-step="mint">Circle mints on <span class="dst-chain">Base</span></li>
         <li data-step="swap" hidden>Swap USDC to EURC on Aerodrome</li>
       </ol>
       <div id="status" class="status"></div>
@@ -99,15 +105,15 @@
 
     <details class="card">
       <summary>Resume a transfer</summary>
-      <p class="muted">Closed the page mid-transfer? Paste the Solana burn transaction signature to check on it.</p>
+      <p class="muted">Closed the page mid-transfer? Paste the burn transaction: a Solana signature, or a Base transaction hash (0x…) for Base → Solana.</p>
       <div class="row">
-        <input id="resumeSig" type="text" placeholder="burn transaction signature" spellcheck="false">
+        <input id="resumeSig" type="text" placeholder="burn transaction signature or hash" spellcheck="false">
         <button id="resume">Resume</button>
       </div>
     </details>
 
     <footer class="muted">
-      Circle CCTP V2 on Solana: TokenMessengerMinterV2 <code>CCTPV2vP…UMQe</code>. Swaps via Jupiter. Attestations and the Base mint come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
+      Circle CCTP V2: TokenMessengerMinterV2 <code>CCTPV2vP…UMQe</code> on Solana, TokenMessengerV2 <code>0x28b5…cf5d</code> on Base. Swaps via Jupiter and Aerodrome. Attestations and the mints come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
       Use at your own risk. <a id="commit" href="https://github.com/SwapMarket/sol2base/tree/__COMMIT__" target="_blank" rel="noopener" title="Source code at the deployed commit">__COMMIT_SHORT__</a>
     </footer>
   </main>
