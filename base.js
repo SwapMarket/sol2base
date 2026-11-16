@@ -13,8 +13,8 @@ import {
   encodeFunctionData,
   getAddress,
   zeroHash,
-} from 'https://esm.sh/viem@2.21.55';
-import { base } from 'https://esm.sh/viem@2.21.55/chains';
+  base,
+} from 'viem';
 
 export const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 export const EURC_BASE = '0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42';

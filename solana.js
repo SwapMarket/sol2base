@@ -8,7 +8,7 @@ import {
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
-} from 'https://esm.sh/@solana/web3.js@1.95.8';
+} from '@solana/web3.js';
 
 export const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 export const USDT_MINT = new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB');

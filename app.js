@@ -1,4 +1,4 @@
-import { isAddress, getAddress } from 'https://esm.sh/viem@2.21.55';
+import { isAddress, getAddress } from 'viem';
 import * as S from 'solana';
 import * as B from 'base';
 
@@ -621,7 +621,7 @@ function base58Decode(s) {
 let wcClient = null;
 async function wcInit() {
   if (wcClient) return wcClient;
-  const { SignClient } = await import('https://esm.sh/@walletconnect/sign-client@2.17.2');
+  const { SignClient } = await import('@walletconnect/sign-client');
   wcClient = await SignClient.init({
     projectId: WALLETCONNECT_PROJECT_ID,
     // The page's own URL (not just the origin, which is a different site with its own favicon), so wallets
@@ -655,7 +655,7 @@ async function restoreWalletConnect() {
 }
 
 async function connectWalletConnect() {
-  const [client, { WalletConnectModal }] = await Promise.all([wcInit(), import('https://esm.sh/@walletconnect/modal@2.7.0')]);
+  const [client, { WalletConnectModal }] = await Promise.all([wcInit(), import('@walletconnect/modal')]);
   const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
   const { uri, approval } = await client.connect({
     requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },

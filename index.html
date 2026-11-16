@@ -8,9 +8,24 @@
   <link rel="apple-touch-icon" href="icon.png">
   <!-- The deploy (build.sh) fills in each file's hash; the browser refuses a file that doesn't match. -->
   <link rel="stylesheet" href="style.css?v=__COMMIT__" integrity="__SRI_style.css__">
+  <!-- Libraries are bundled from package-lock.json into vendor/ by build.sh, and pinned like the rest. -->
   <script type="importmap">{
-    "imports": { "solana": "./solana.js?v=__COMMIT__", "base": "./base.js?v=__COMMIT__" },
-    "integrity": { "./solana.js?v=__COMMIT__": "__SRI_solana.js__", "./base.js?v=__COMMIT__": "__SRI_base.js__" }
+    "imports": {
+      "solana": "./solana.js?v=__COMMIT__",
+      "base": "./base.js?v=__COMMIT__",
+      "viem": "./vendor/viem.js?v=__COMMIT__",
+      "@solana/web3.js": "./vendor/web3.js?v=__COMMIT__",
+      "@walletconnect/sign-client": "./vendor/sign-client.js?v=__COMMIT__",
+      "@walletconnect/modal": "./vendor/modal.js?v=__COMMIT__"
+    },
+    "integrity": {
+      "./solana.js?v=__COMMIT__": "__SRI_solana.js__",
+      "./base.js?v=__COMMIT__": "__SRI_base.js__",
+      "./vendor/viem.js?v=__COMMIT__": "__SRI_vendor/viem.js__",
+      "./vendor/web3.js?v=__COMMIT__": "__SRI_vendor/web3.js__",
+      "./vendor/sign-client.js?v=__COMMIT__": "__SRI_vendor/sign-client.js__",
+      "./vendor/modal.js?v=__COMMIT__": "__SRI_vendor/modal.js__"
+    }
   }</script>
 </head>
 <body>

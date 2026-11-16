@@ -1,6 +1,6 @@
 # sol2base
 
-A static page that moves USDC or USDT from Solana to Base, or USDC or EURC from Base to Solana, with Circle's CCTP V2. There's no backend, and the only build step is the deploy's `build.sh`.
+A static page that moves USDC or USDT from Solana to Base, or USDC or EURC from Base to Solana, with Circle's CCTP V2. There's no backend; the deploy's `build.sh` bundles the libraries and pins every file.
 
 Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](https://github.com/SwapMarket/eth2base) (Ethereum → Base).
 
@@ -54,12 +54,20 @@ re-sent until confirmed or expired.
 
 ## Deploy and file pinning
 
-`build.sh <commit>` (run by the Pages workflow) copies the files into `_site/`, stamps the commit into `index.html`, and writes
-the SHA-384 of `app.js`, `solana.js`, `base.js` and `style.css` into it as Subresource Integrity: `integrity` attributes on the
-script and stylesheet, and the import map's `integrity` field for the two modules. The browser refuses a file whose content
-doesn't match (import-map integrity needs Chrome 127+, Safari 18+ or Firefox 138+; older browsers load the modules unchecked).
-Opened straight from the repo, the placeholders aren't valid hashes, so the browser ignores them (with a console warning).
-Not pinned: `sw.js` (service workers can't carry integrity), `icon.png`, and the libraries loaded from esm.sh.
+`build.sh <commit>` (run by the Pages workflow) builds the site into `_site/`:
+
+- **Libraries**: viem, @solana/web3.js and WalletConnect (sign client and modal) are installed with `npm ci` from
+  `package-lock.json` (exact versions, each package checked against its recorded hash, no install scripts) and bundled by
+  esbuild from the entry files in `deps/` into `vendor/`. The page loads nothing from CDNs; the code imports them by name
+  (`'viem'`, `'@solana/web3.js'`…) through the import map.
+- **Pinning**: it stamps the commit into `index.html` and writes the SHA-384 of every script it loads (`app.js`, `solana.js`,
+  `base.js`, the four `vendor/` bundles) and of `style.css` as Subresource Integrity: `integrity` attributes on the entry
+  script and stylesheet, and the import map's `integrity` field for the modules. The browser refuses a file whose content
+  doesn't match (import-map integrity needs Chrome 127+, Safari 18+ or Firefox 138+; older browsers load the modules unchecked).
+  Not pinned: `sw.js` (service workers can't carry integrity) and `icon.png`.
+
+To run it locally: `./build.sh`, then serve `_site/` (e.g. `python3 -m http.server -d _site`). The repo files alone don't run,
+since the libraries only exist after the build.
 
 ## Addresses
 
