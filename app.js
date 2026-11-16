@@ -275,6 +275,8 @@ function requestUsdtQuote(amt) {
 
 // End-to-end EUR/USD: USDC (or USDT) sent from Solana per EURC received on Base, all fees included.
 const eurUsd = (sent, eurcOut) => (Number(sent) / Number(eurcOut)).toFixed(4);
+// Base → Solana paying with EURC: USDC (or USDT) received on Solana per EURC sent, all fees included.
+const rateNote = (eurcIn, usdOut) => (eurcIn ? `. Effective EUR/USD ${eurUsd(usdOut, eurcIn)}, all fees included` : '');
 let quoteSeq = 0;
 let quoteTimer = null;
 let shownQuoteKey = null; // source:amount:speed:topUp the displayed EURC quote was computed for
@@ -520,7 +522,8 @@ function refreshFormToSol() {
       const inputKey = `${srcB}:${amt}:${currentMode()}:${d.needsAccount}`;
       const uq = usdtOutQuote(minted);
       if (uq?.value) {
-        receive = `You receive about ${fmt(BigInt(uq.value.outAmount))} USDT on Solana (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
+        const usdtOut = BigInt(uq.value.outAmount);
+        receive = `You receive about ${fmt(usdtOut)} USDT on Solana${rateNote(eurcNote && amt, usdtOut)} (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
         shownUsdt = { key: inputKey, text: receive };
       } else if (shownUsdt?.key === inputKey) {
         receive = shownUsdt.text;
@@ -529,7 +532,7 @@ function refreshFormToSol() {
         if (uq?.error) ok = false;
       }
     } else if (minted > 0n) {
-      receive = eurcNote ? `You receive about ${fmt(minted)} USDC on Solana${created} (${eurcNote}, then Circle's fee)` : `You receive at least ${fmt(minted)} USDC on Solana${created}`;
+      receive = eurcNote ? `You receive about ${fmt(minted)} USDC on Solana${created}${rateNote(amt, minted)} (${eurcNote}, then Circle's fee)` : `You receive at least ${fmt(minted)} USDC on Solana${created}`;
     }
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
@@ -1068,7 +1071,7 @@ async function finishToSol(m, to, out = 'USDC', source = null) {
   const sent = source ? `${fmt(source.amount)} EURC` : `${fmt(burned)} USDC`;
   const before = source ? `EURC → ${fmt(burned)} USDC via Aerodrome ${baseTx(source.hash)}, ` : '';
   if (out !== 'USDT') {
-    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Solana ${forWhom} ${link}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.`, 'ok');
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Solana ${forWhom} ${link}${rateNote(source?.amount, minted)}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.`, 'ok');
     return;
   }
   if (!to) {
@@ -1076,7 +1079,7 @@ async function finishToSol(m, to, out = 'USDC', source = null) {
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  pendingUsdt = { amountIn: minted, owner: to, sent, before, fee };
+  pendingUsdt = { amountIn: minted, owner: to, sent, before, fee, eurcIn: source?.amount ?? null };
   setStatus(`${fmt(minted)} USDC minted on Solana ${link}. Now swapping to USDT…`);
   await swapToUsdt();
 }
@@ -1093,7 +1096,7 @@ async function swapToUsdt() {
     setStep('swap', 'done');
     pendingUsdt = null;
     clearPending();
-    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
+    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana${rateNote(p.eurcIn, usdt)}. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
