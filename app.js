@@ -436,6 +436,7 @@ function quoteFor(kind, amount, fetcher) {
   return q;
 }
 const eurcInQuote = (amount) => quoteFor('eurcIn', amount, () => B.quoteUsdcFromEurc(amount));
+let shownUsdt = null; // { key, text }: the last USDT quote shown, per input (see refreshFormToSol)
 const usdtOutQuote = (amount) => quoteFor('usdtOut', amount, () => S.jupiterQuote(amount, SLIPPAGE_BPS, S.USDC_MINT, S.USDT_MINT));
 
 // SOL the Solana wallet needs to swap the minted USDC to USDT: fees, plus a USDT account if missing.
@@ -514,9 +515,15 @@ function refreshFormToSol() {
     } else ok = !!baseBal && (!toOwner || !!bal);
     const created = d.needsAccount ? ', in a USDC account Circle creates for the recipient' : '';
     if (minted > 0n && toOwner) {
+      // The minted amount moves a little whenever the fee or the EURC quote refreshes; until the USDT
+      // quote for the new amount arrives, keep showing the last one for the same input.
+      const inputKey = `${srcB}:${amt}:${currentMode()}:${d.needsAccount}`;
       const uq = usdtOutQuote(minted);
       if (uq?.value) {
         receive = `You receive about ${fmt(BigInt(uq.value.outAmount))} USDT on Solana (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
+        shownUsdt = { key: inputKey, text: receive };
+      } else if (shownUsdt?.key === inputKey) {
+        receive = shownUsdt.text;
       } else {
         receive = uq?.error ? 'No USDC → USDT route on Jupiter right now.' : 'Getting USDC → USDT quote…';
         if (uq?.error) ok = false;
