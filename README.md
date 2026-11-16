@@ -1,6 +1,6 @@
 # sol2base
 
-A static page that moves USDC or USDT from Solana to Base, or USDC or EURC from Base to Solana, with Circle's CCTP V2. There's no build step and no backend.
+A static page that moves USDC or USDT from Solana to Base, or USDC or EURC from Base to Solana, with Circle's CCTP V2. There's no backend, and the only build step is the deploy's `build.sh`.
 
 Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](https://github.com/SwapMarket/eth2base) (Ethereum → Base).
 
@@ -49,6 +49,15 @@ calls `MessageTransmitterV2.reclaim_event_account` with Circle's attestation and
 
 Reads go to public Solana RPCs (publicnode, then Solana's own); transactions are signed by the wallet and sent by the page,
 re-sent until confirmed or expired.
+
+## Deploy and file pinning
+
+`build.sh <commit>` (run by the Pages workflow) copies the files into `_site/`, stamps the commit into `index.html`, and writes
+the SHA-384 of `app.js`, `solana.js`, `base.js` and `style.css` into it as Subresource Integrity: `integrity` attributes on the
+script and stylesheet, and the import map's `integrity` field for the two modules. The browser refuses a file whose content
+doesn't match (import-map integrity needs Chrome 127+, Safari 18+ or Firefox 138+; older browsers load the modules unchecked).
+Opened straight from the repo, the placeholders aren't valid hashes, so the browser ignores them (with a console warning).
+Not pinned: `sw.js` (service workers can't carry integrity), `icon.png`, and the libraries loaded from esm.sh.
 
 ## Addresses
 

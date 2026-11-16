@@ -6,8 +6,12 @@
   <title>sol2base — USDC between Solana and Base via CCTP</title>
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
-  <link rel="stylesheet" href="style.css?v=__COMMIT__">
-  <script type="importmap">{ "imports": { "solana": "./solana.js?v=__COMMIT__", "base": "./base.js?v=__COMMIT__" } }</script>
+  <!-- The deploy (build.sh) fills in each file's hash; the browser refuses a file that doesn't match. -->
+  <link rel="stylesheet" href="style.css?v=__COMMIT__" integrity="__SRI_style.css__">
+  <script type="importmap">{
+    "imports": { "solana": "./solana.js?v=__COMMIT__", "base": "./base.js?v=__COMMIT__" },
+    "integrity": { "./solana.js?v=__COMMIT__": "__SRI_solana.js__", "./base.js?v=__COMMIT__": "__SRI_base.js__" }
+  }</script>
 </head>
 <body>
   <main>
@@ -130,6 +134,6 @@
       Use at your own risk. <a id="commit" href="https://github.com/SwapMarket/sol2base/tree/__COMMIT__" target="_blank" rel="noopener" title="Source code at the deployed commit">__COMMIT_SHORT__</a>
     </footer>
   </main>
-  <script type="module" src="app.js?v=__COMMIT__"></script>
+  <script type="module" src="app.js?v=__COMMIT__" integrity="__SRI_app.js__"></script>
 </body>
 </html>
