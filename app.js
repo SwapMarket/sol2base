@@ -40,9 +40,10 @@ let owner = null; // PublicKey
 // Per route: { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units. toSolSetup
 // is Base → Solana when Circle also creates the recipient's USDC account (its rent is in the fee).
 let allFees = null; // { toBase, toSol, toSolSetup }
-// Base → Solana recipient: { addr, needsAccount (no USDC account yet), tokenAccount (the address is itself
-// a token account, not a wallet) }, or { addr, pending } while it's being looked up.
-let solDest = null;
+// Base → Solana: what's known about Solana wallets (the one USDC is minted to, the USDT recipient), by
+// address: { addr, needsAccount (no USDC account yet), usdtAccount (has a USDT account), tokenAccount
+// (the address is itself a token account, not a wallet) }, or { pending } while it's being looked up.
+const solInfo = new Map();
 let bal = null; // { usdc, usdt, sol, usdcAccount }: base units, lamports, whether the USDC account exists
 let busy = false; // a transfer started from the form is in progress
 let evm = null; // Base wallet { address, wallet, ensureBase, name }: needed for EURC (it signs the swap)
@@ -101,22 +102,27 @@ function solRecipient() {
 }
 
 // Fees for the selected route (Base → Solana: with account creation when the recipient needs it).
-function feesFor(all = allFees, dest = solDest) {
+function feesFor(all = allFees, dest = null) {
   if (!all) return null;
   if (currentDir() === 'toBase') return all.toBase;
   return dest?.needsAccount ? all.toSolSetup : all.toSol;
 }
 
-// Look up whether a Solana recipient has a USDC account, and that it isn't itself a token account.
+// Look up a Solana wallet's USDC and USDT accounts, and that it isn't itself a token account.
 async function lookupSolDest(pk) {
-  const { value: [acct, usdcAcct] } = await rpc('getMultipleAccounts', [[pk.toBase58(), S.ata(pk, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }]);
-  return { addr: pk.toBase58(), needsAccount: !usdcAcct, tokenAccount: acct?.owner === S.TOKEN_PROGRAM_ID.toBase58() };
+  const keys = [pk, S.ata(pk, S.USDC_MINT), S.ata(pk, S.USDT_MINT)].map((k) => k.toBase58());
+  const { value: [acct, usdcAcct, usdtAcct] } = await rpc('getMultipleAccounts', [keys, { encoding: 'base64', commitment: 'confirmed' }]);
+  return { addr: pk.toBase58(), needsAccount: !usdcAcct, usdtAccount: !!usdtAcct, tokenAccount: acct?.owner === S.TOKEN_PROGRAM_ID.toBase58() };
 }
-function checkSolDest(pk) {
-  if (solDest?.addr === pk.toBase58()) return;
-  solDest = { addr: pk.toBase58(), pending: true };
-  lookupSolDest(pk).then((d) => { if (solDest?.addr === d.addr) { solDest = d; refreshForm(); } })
-    .catch((e) => { console.warn('recipient lookup', e); if (solDest?.addr === pk.toBase58()) solDest = null; });
+// The cached lookup for a wallet, or null while it's being fetched (the form refreshes when it arrives).
+function solInfoFor(pk) {
+  const addr = pk.toBase58();
+  const known = solInfo.get(addr);
+  if (known) return known.pending ? null : known;
+  solInfo.set(addr, { pending: true });
+  lookupSolDest(pk).then((d) => { solInfo.set(addr, d); refreshForm(); })
+    .catch((e) => { console.warn('recipient lookup', e); solInfo.delete(addr); });
+  return null;
 }
 
 let rpcIndex = 0;
@@ -441,40 +447,45 @@ const eurcInQuote = (amount) => quoteFor('eurcIn', amount, () => B.quoteUsdcFrom
 let shownUsdt = null; // { key, text }: the last USDT quote shown, per input (see refreshFormToSol)
 const usdtOutQuote = (amount) => quoteFor('usdtOut', amount, () => S.jupiterQuote(amount, SLIPPAGE_BPS, S.USDC_MINT, S.USDT_MINT));
 
-// SOL the Solana wallet needs to swap the minted USDC to USDT: fees, plus a USDT account if missing.
-const solForUsdt = () => LAMPORTS.fees + LAMPORTS.swap + (bal?.usdtAccount ? 0n : LAMPORTS.usdcAccount);
+// SOL the connected Solana wallet needs to swap the minted USDC to USDT for `to`: fees, plus the
+// recipient's USDT account if missing (the wallet creates it).
+const solForUsdt = (hasUsdtAccount) => LAMPORTS.fees + LAMPORTS.swap + (hasUsdtAccount ? 0n : LAMPORTS.usdcAccount);
 
 // The form for Base → Solana: USDC (or EURC, swapped first) from the connected Base wallet to a Solana
-// wallet, received as USDC (or USDT, swapped by the connected Solana wallet).
+// wallet, received as USDC, or as USDT: then the USDC is minted to the connected Solana wallet, which
+// swaps it and sends the USDT to the recipient.
 function refreshFormToSol() {
   const srcB = currentSrcB();
-  // USDT needs the connected Solana wallet: the USDC is minted to it, and it signs the swap.
   const usdtRadio = document.querySelector('input[name=outS][value=USDT]');
   usdtRadio.disabled = !owner;
   if (owner && preferredOutS === 'USDT') usdtRadio.checked = true;
   if (!owner && usdtRadio.checked) document.querySelector('input[name=outS][value=USDC]').checked = true;
-  const out = currentOutS();
-  $('usdtHint').textContent = owner ? '· your Solana wallet receives it and signs the swap; needs a little SOL' : '· needs a connected Solana wallet with a little SOL';
-  const toOwner = out === 'USDT';
-  $('recipientSol').hidden = toOwner;
+  const usdtMode = currentOutS() === 'USDT';
+  $('usdtHint').textContent = owner ? '· your Solana wallet swaps it and pays the fees in SOL' : '· needs a connected Solana wallet with a little SOL';
 
-  const typed = toOwner ? '' : $('recipientSol').value.trim();
-  const dest = toOwner ? owner : solRecipient();
-  if (dest) checkSolDest(dest);
-  const d = dest && solDest?.addr === dest.toBase58() && !solDest.pending ? solDest : null;
-  $('recipientLabel').textContent = toOwner ? 'USDT recipient on Solana' : 'Recipient on Solana';
+  const typed = $('recipientSol').value.trim();
+  const dest = solRecipient();
+  const mintTo = usdtMode ? owner : dest; // the wallet Circle mints the USDC to
+  const d = mintTo && solInfoFor(mintTo); // decides the fee (USDC account creation)
+  const r = dest && (dest.equals(mintTo) ? d : solInfoFor(dest));
+  const toSelf = !!(owner && dest?.equals(owner));
+  $('recipientLabel').textContent = usdtMode ? 'USDT recipient on Solana' : 'Recipient on Solana';
   $('recipientSol').placeholder = owner ? `defaults to your Solana wallet ${short(owner.toBase58())}` : 'your Solana wallet address';
   const name = wallet?.name ?? 'wallet';
   const who = !dest ? ''
-    : toOwner ? `Your connected Solana wallet (${name}, ${short(dest.toBase58())}): the USDC is minted to it, and it signs the swap.`
-      : !typed ? `Using your connected Solana wallet (${name}).`
-        : owner && dest.equals(owner) ? `This is your connected Solana wallet (${name}).`
-          : 'Make sure you control this address on Solana.';
+    : !typed ? `Using your connected Solana wallet (${name}).`
+      : toSelf ? `This is your connected Solana wallet (${name}).`
+        : 'Make sure you control this address on Solana.';
   const setupFee = allFees ? allFees.toSolSetup[currentMode()].forward - allFees.toSol[currentMode()].forward : 0n;
-  const account = !d ? ''
-    : d.tokenAccount ? ' This is a token account, not a wallet: enter the wallet address.'
-      : d.needsAccount ? ` It has no USDC account yet: Circle creates one, which adds about ${fmt(setupFee)} USDC to the fee.${toOwner ? '' : ' No SOL needed.'}` : '';
-  $('recipientHint').textContent = who + account;
+  const creates = ` Circle creates one, which adds about ${fmt(setupFee)} USDC to the fee.`;
+  let notes = '';
+  if (r?.tokenAccount) notes = ' This is a token account, not a wallet: enter the wallet address.';
+  else if (usdtMode) {
+    if (!toSelf && dest) notes += ` The USDC is minted to your connected wallet (${short(owner.toBase58())}), which swaps it and sends the USDT here.`;
+    if (!toSelf && r && !r.usdtAccount) notes += ' This wallet has no USDT account yet: yours creates one (about 0.002 SOL).';
+    if (d?.needsAccount) notes += ` Your wallet has no USDC account yet:${creates}`;
+  } else if (d?.needsAccount) notes = ` It has no USDC account yet:${creates} No SOL needed.`;
+  $('recipientHint').textContent = who + notes;
   $('amountLabel').textContent = `Amount (${srcB})`;
 
   const amt = parseAmount();
@@ -501,8 +512,8 @@ function refreshFormToSol() {
   else if (!amt) label = 'Enter an amount';
   else if (!usdc) label = eq?.error ? 'No EURC → USDC route right now' : 'Getting EURC → USDC quote…';
   else if (!dest) label = typed ? 'Recipient is not a valid Solana address' : 'Enter the Solana recipient';
-  else if (!d) label = 'Checking the recipient on Solana…';
-  else if (d.tokenAccount) label = 'Enter a wallet address, not a token account';
+  else if (!d || !r) label = 'Checking the recipient on Solana…';
+  else if (r.tokenAccount) label = 'Enter a wallet address, not a token account';
   else {
     const fee = maxFeeFor(usdc, currentMode(), feesFor(allFees, d));
     const minted = usdc - fee;
@@ -511,19 +522,20 @@ function refreshFormToSol() {
     else if (baseBal && baseBal.eth < gas) {
       label = 'Not enough ETH on Base';
       warn = `This needs about ${fmtEth(gas)} ETH on Base for gas; you have ${fmtEth(baseBal.eth)}.`;
-    } else if (toOwner && bal && bal.sol < solForUsdt()) {
+    } else if (usdtMode && bal && bal.sol < solForUsdt(toSelf ? bal.usdtAccount : r.usdtAccount)) {
+      const hasUsdt = toSelf ? bal.usdtAccount : r.usdtAccount;
       label = 'Not enough SOL for the USDT swap';
-      warn = `The USDT swap needs about ${fmtSol(solForUsdt())} SOL in your Solana wallet (network fees${bal.usdtAccount ? '' : ' and a USDT account'}); you have ${fmtSol(bal.sol)}.`;
-    } else ok = !!baseBal && (!toOwner || !!bal);
+      warn = `The USDT swap needs about ${fmtSol(solForUsdt(hasUsdt))} SOL in your Solana wallet (network fees${hasUsdt ? '' : ' and a USDT account for the recipient'}); you have ${fmtSol(bal.sol)}.`;
+    } else ok = !!baseBal && (!usdtMode || !!bal);
     const created = d.needsAccount ? ', in a USDC account Circle creates for the recipient' : '';
-    if (minted > 0n && toOwner) {
+    if (minted > 0n && usdtMode) {
       // The minted amount moves a little whenever the fee or the EURC quote refreshes; until the USDT
       // quote for the new amount arrives, keep showing the last one for the same input.
-      const inputKey = `${srcB}:${amt}:${currentMode()}:${d.needsAccount}`;
+      const inputKey = `${srcB}:${amt}:${currentMode()}:${d.needsAccount}:${dest.toBase58()}`;
       const uq = usdtOutQuote(minted);
       if (uq?.value) {
         const usdtOut = BigInt(uq.value.outAmount);
-        receive = `You receive about ${fmt(usdtOut)} USDT on Solana${rateNote(eurcNote && amt, usdtOut)} (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
+        receive = `${toSelf ? 'You receive' : `${short(dest.toBase58())} receives`} about ${fmt(usdtOut)} USDT on Solana${rateNote(eurcNote && amt, usdtOut)} (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
         shownUsdt = { key: inputKey, text: receive };
       } else if (shownUsdt?.key === inputKey) {
         receive = shownUsdt.text;
@@ -886,19 +898,33 @@ function explain(e) {
 
 // ---------- flow ----------
 
-// Swap with Jupiter from the connected Solana wallet, after checking the swap by simulation.
-// Resolves to the amount of outMint received. Only for USDT ↔ USDC (checked against 1:1).
-async function jupiterSwap(inMint, outMint, amountIn, [inName, outName]) {
+// Swap with Jupiter from the connected Solana wallet, after checking the swap by simulation; the output
+// goes to `to` (default: the wallet itself). Resolves to the amount of outMint `to` received. Only for
+// USDT ↔ USDC (checked against 1:1).
+async function jupiterSwap(inMint, outMint, amountIn, [inName, outName], to = owner) {
+  const other = !to.equals(owner);
+  const outAccount = S.ata(to, outMint).toBase58();
+  const outNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[outAccount], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
+  // Jupiter creates the wallet's own output account if needed, but not another wallet's: create it first.
+  const exists = async () => !!(await rpc('getMultipleAccounts', [[outAccount], { encoding: 'base64', commitment: 'confirmed' }])).value[0];
+  if (other && !(await exists())) {
+    const { value: { blockhash, lastValidBlockHeight } } = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+    const tx = S.buildCreateAtaTx({ payer: owner, owner: to, mint: outMint, blockhash });
+    const sim = await rpc('simulateTransaction', [b64(tx.serialize()), { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true }]);
+    if (sim.value.err) throw new Error(`Creating the recipient's ${outName} account would fail: ${JSON.stringify(sim.value.err)}`);
+    setStatus(`Confirm creating ${short(to.toBase58())}'s ${outName} account (about 0.002 SOL) ${inWallet()}…`);
+    if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Account creation', exists);
+    else await signAndSend(tx, lastValidBlockHeight, 'Account creation');
+  }
   setStatus('Getting a Jupiter route…');
   const quote = await S.jupiterQuote(amountIn, SLIPPAGE_BPS, inMint, outMint);
   const minOut = BigInt(quote.otherAmountThreshold);
   // Sanity floor independent of Jupiter: USDT and USDC trade near 1:1.
   if (minOut < (amountIn * 98n) / 100n) throw new Error('Jupiter quote is too far from 1:1');
-  const { tx, lastValidBlockHeight } = await S.jupiterSwapTx(quote, owner);
-  await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint, outMint);
-  const outNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, outMint).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
+  const { tx, lastValidBlockHeight } = await S.jupiterSwapTx(quote, owner, other ? to : null);
+  await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint, outMint, to);
   const before = await outNow();
-  setStatus(`Confirm the swap of ${fmt(amountIn)} ${inName} for about ${fmt(BigInt(quote.outAmount))} ${outName} ${inWallet()}…`);
+  setStatus(`Confirm the swap of ${fmt(amountIn)} ${inName} for about ${fmt(BigInt(quote.outAmount))} ${outName}${other ? ` for ${short(to.toBase58())}` : ''} ${inWallet()}…`);
   if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await outNow()) >= before + minOut);
   else await signAndSend(tx, lastValidBlockHeight, 'Swap');
   const received = (await outNow()) - before;
@@ -991,15 +1017,16 @@ async function bridgeToSolana() {
   let amount = parseAmount();
   const srcB = currentSrcB();
   const out = currentOutS();
-  const dest = out === 'USDT' ? owner : solRecipient();
-  if (!amount || !allFees || !dest || !evm) return;
+  const dest = solRecipient(); // USDT: the USDT recipient
+  const mintTo = out === 'USDT' ? owner : dest; // USDT: the connected wallet gets the USDC and swaps it
+  if (!amount || !allFees || !dest || !mintTo || !evm) return;
   const shownUsdc = srcB === 'EURC' ? quoteCache.get(`eurcIn:${amount}`)?.value?.amountOut : amount;
   if (!shownUsdc) return;
   await askNotifications();
   const mode = currentMode();
-  try { if (out !== 'USDT' && $('recipientSol').value.trim()) localStorage.setItem(RECIPIENT_SOL_KEY, dest.toBase58()); } catch {}
+  try { if ($('recipientSol').value.trim()) localStorage.setItem(RECIPIENT_SOL_KEY, dest.toBase58()); } catch {}
   // Never charge more than the fee the user saw (plus a little when the amount comes from a swap).
-  const shownFee = maxFeeFor(shownUsdc, mode, feesFor(allFees, solDest)) + (srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n);
+  const shownFee = maxFeeFor(shownUsdc, mode, feesFor(allFees, solInfo.get(mintTo.toBase58()))) + (srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n);
 
   $('bridge').disabled = true;
   resetSteps('toSol');
@@ -1020,23 +1047,26 @@ async function bridgeToSolana() {
     setStep('burn', 'active');
     setStatus('Checking the recipient and the current fee…');
     // The account may have been created (or closed) since the form looked; decide on what's there now.
-    const [d] = await Promise.all([lookupSolDest(dest), loadFees().then((ok) => { if (!ok) throw new Error('Could not load current fees from Circle. Try again.'); })]);
-    if (d.tokenAccount) throw new Error('The recipient is a token account, not a wallet. Enter the wallet address.');
+    const [d, r] = await Promise.all([
+      lookupSolDest(mintTo), dest.equals(mintTo) ? null : lookupSolDest(dest),
+      loadFees().then((ok) => { if (!ok) throw new Error('Could not load current fees from Circle. Try again.'); }),
+    ]);
+    if ((r ?? d).tokenAccount) throw new Error('The recipient is a token account, not a wallet. Enter the wallet address.');
     const maxFee = maxFeeFor(amount, mode, feesFor(allFees, d));
     const swapped = source ? `Swapped to ${fmt(amount)} USDC. ` : '';
     if (maxFee > shownFee) throw new Error(`${swapped}Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
     if (amount <= maxFee) throw new Error(`${swapped}Amount must be larger than the fee.`);
 
     const hash = await B.burnUsdc({
-      signer: evm, amount, destinationDomain: S.DOMAIN_SOLANA, mintRecipient: S.usdcMintRecipient(dest),
-      maxFee, minFinalityThreshold: FINALITY[mode], hookData: S.solanaForwardHook(dest, d.needsAccount),
+      signer: evm, amount, destinationDomain: S.DOMAIN_SOLANA, mintRecipient: S.usdcMintRecipient(mintTo),
+      maxFee, minFinalityThreshold: FINALITY[mode], hookData: S.solanaForwardHook(mintTo, d.needsAccount),
       setStatus, inWallet: inBaseWallet,
     });
     unburned = null;
-    savePending({ sig: hash, dir: 'toSol', to: dest.toBase58(), out });
+    savePending({ sig: hash, dir: 'toSol', to: mintTo.toBase58(), usdtTo: dest.toBase58(), out });
     setStep('burn', 'done');
     refreshBaseBalances();
-    await finishToSol(await track(hash, mode, 'toSol'), dest.toBase58(), out, source);
+    await finishToSol(await track(hash, mode, 'toSol'), mintTo.toBase58(), out, source, dest.toBase58());
   } catch (e) {
     console.error(e);
     setStatus(explain(e), 'err');
@@ -1051,12 +1081,13 @@ async function bridgeToSolana() {
   }
 }
 
-async function finishToSol(m, to, out = 'USDC', source = null) {
+// `to`: the wallet the USDC was minted to; `usdtTo`: the USDT recipient (default: `to`).
+async function finishToSol(m, to, out = 'USDC', source = null, usdtTo = to) {
   // A USDT transfer stays saved (for Resume after a reload) until its swap is done.
   if (out !== 'USDT') clearPending();
   refreshBalances();
   refreshBaseBalances();
-  solDest = null; // the recipient now has a USDC account
+  solInfo.clear(); // the recipient now has a USDC account (and maybe a USDT one)
   const link = solTx(m.forwardTxHash);
   const body = m.decodedMessage?.decodedMessageBody;
   if (!body?.amount) {
@@ -1079,7 +1110,7 @@ async function finishToSol(m, to, out = 'USDC', source = null) {
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  pendingUsdt = { amountIn: minted, owner: to, sent, before, fee, eurcIn: source?.amount ?? null };
+  pendingUsdt = { amountIn: minted, owner: to, to: usdtTo ?? to, sent, before, fee, eurcIn: source?.amount ?? null };
   setStatus(`${fmt(minted)} USDC minted on Solana ${link}. Now swapping to USDT…`);
   await swapToUsdt();
 }
@@ -1092,11 +1123,13 @@ async function swapToUsdt() {
   setStep('swap', 'active');
   try {
     if (!owner || owner.toBase58() !== p.owner) throw new Error(`The USDC went to ${short(p.owner)}. Connect that Solana wallet to swap.`);
-    const usdt = await jupiterSwap(S.USDC_MINT, S.USDT_MINT, p.amountIn, ['USDC', 'USDT']);
+    const usdt = await jupiterSwap(S.USDC_MINT, S.USDT_MINT, p.amountIn, ['USDC', 'USDT'], new S.PublicKey(p.to));
     setStep('swap', 'done');
     pendingUsdt = null;
     clearPending();
-    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana${rateNote(p.eurcIn, usdt)}. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
+    solInfo.clear();
+    const forWhom = p.to === p.owner ? '' : ` for ${short(p.to)}`;
+    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana${forWhom}${rateNote(p.eurcIn, usdt)}. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
@@ -1118,7 +1151,7 @@ async function resume() {
     document.querySelector('#steps li[data-step="swap"]').hidden = out !== 'USDT';
     setStep('burn', 'done');
     try {
-      await finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null, out);
+      await finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null, out, null, same ? saved.usdtTo : undefined);
     } catch (e) {
       console.error(e);
       setStatus(errMsg(e), 'err');

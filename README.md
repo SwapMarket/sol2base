@@ -37,7 +37,9 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
    so **Circle creates the account and mints**: the recipient needs no SOL. Needs a little ETH on Base for the two transactions.
 3. **Track**: `GET /v2/messages/6?transactionHash=<hash>` until `forwardTxHash` (the Solana mint).
 4. **Optional, receive USDT**: the USDC is minted to the connected Solana wallet, which then swaps exactly the minted amount to
-   USDT with Jupiter (checked by simulation, as for USDT → USDC). Needs about 0.003 SOL: network fees, plus a USDT account if missing. Standard speed waits for Base
+   USDT with Jupiter (checked by simulation, as for USDT → USDC) and sends it to the recipient (by default that wallet itself;
+   for another wallet, through Jupiter's `destinationTokenAccount`). Needs about 0.003 SOL: network fees, plus the recipient's
+   USDT account if missing (the connected wallet creates it first, since Jupiter only creates the signer's own). Standard speed waits for Base
    finality (about 15–20 minutes); fast takes seconds. Resume accepts the Base transaction hash.
 
 **SOL needed**: about 0.003 SOL, mostly rent for the account where CCTP records the message (reclaimable from Circle's program after

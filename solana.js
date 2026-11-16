@@ -158,6 +158,23 @@ export function buildReclaimTx({ owner, eventAccount, attestation, message, bloc
   return new VersionedTransaction(new TransactionMessage({ payerKey: owner, recentBlockhash: blockhash, instructions: [ix] }).compileToV0Message());
 }
 
+// Create `owner`'s associated token account for `mint`, paid by `payer` (idempotent: no-op if it exists).
+export function buildCreateAtaTx({ payer, owner, mint, blockhash }) {
+  const ix = new TransactionInstruction({
+    programId: ATA_PROGRAM,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata(owner, mint), isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+    ],
+    data: Uint8Array.from([1]), // CreateIdempotent
+  });
+  return new VersionedTransaction(new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions: [ix] }).compileToV0Message());
+}
+
 // ---------- Jupiter (USDT ↔ USDC) ----------
 
 const JUPITER = 'https://lite-api.jup.ag/swap/v1';
@@ -171,14 +188,18 @@ export async function jupiterQuote(amountIn, slippageBps, inputMint = USDT_MINT,
 
 // Build the swap for `owner` from a quote; returns { tx, lastValidBlockHeight }. The transaction is built by Jupiter's server, so the caller
 // checks its effect by simulation before asking the wallet to sign (see checkSwapBySimulation).
-export async function jupiterSwapTx(quote, owner) {
+// With `to` (another wallet), the output goes to that wallet's associated token account, which must exist.
+export async function jupiterSwapTx(quote, owner, to = null) {
   const res = await fetch(`${JUPITER}/swap`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // Jupiter's default compute limit (1.4M). Its "dynamic" limit is measured by simulation with almost no
     // headroom, so a route that gets slightly costlier before sending fails with "budget exceeded";
     // the priority fee stays tiny (~0.000003 SOL) either way.
-    body: JSON.stringify({ quoteResponse: quote, userPublicKey: owner.toBase58(), dynamicComputeUnitLimit: false, prioritizationFeeLamports: 'auto' }),
+    body: JSON.stringify({
+      quoteResponse: quote, userPublicKey: owner.toBase58(), dynamicComputeUnitLimit: false, prioritizationFeeLamports: 'auto',
+      ...(to ? { destinationTokenAccount: ata(to, new PublicKey(quote.outputMint)).toBase58() } : {}),
+    }),
   });
   const { swapTransaction, lastValidBlockHeight, error } = await res.json();
   if (!swapTransaction) throw new Error(error || 'Jupiter could not build the swap');
@@ -194,9 +215,10 @@ const tokenAmount = (acct) => {
 };
 
 // Simulate a Jupiter swap and check it does what was quoted: the owner's input token goes down by exactly
-// amountIn and their output token goes up by at least minOut. Returns the simulated amount received.
-export async function checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint = USDT_MINT, outMint = USDC_MINT) {
-  const inAta = ata(owner, inMint), outAta = ata(owner, outMint);
+// amountIn and the output token of `to` (default: the owner) goes up by at least minOut. Returns the
+// simulated amount received.
+export async function checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint = USDT_MINT, outMint = USDC_MINT, to = owner) {
+  const inAta = ata(owner, inMint), outAta = ata(to, outMint);
   const before = await rpc('getMultipleAccounts', [[inAta.toBase58(), outAta.toBase58()], { encoding: 'base64' }]);
   const sim = await rpc('simulateTransaction', [btoa(String.fromCharCode(...tx.serialize())), {
     encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true,
