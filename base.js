@@ -66,12 +66,12 @@ export const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_bl
 
 // ---------- quotes and balances ----------
 
-// Best USDC→token quote across Aerodrome Slipstream pools: { amountOut, tickSpacing }.
-async function quoteAero(tokenOut, amountIn, tickSpacings) {
+// Best quote across Aerodrome Slipstream pools: { amountOut, tickSpacing }.
+async function quoteAero(tokenOut, amountIn, tickSpacings, tokenIn = USDC_BASE) {
   const quotes = await Promise.allSettled(tickSpacings.map((tickSpacing) =>
     baseClient.simulateContract({
       address: AERO_QUOTER, abi: quoterAbi, functionName: 'quoteExactInputSingle',
-      args: [{ tokenIn: USDC_BASE, tokenOut, amountIn, tickSpacing, sqrtPriceLimitX96: 0n }],
+      args: [{ tokenIn, tokenOut, amountIn, tickSpacing, sqrtPriceLimitX96: 0n }],
     }).then(({ result }) => ({ amountOut: result[0], tickSpacing }))));
   const ok = quotes.filter((q) => q.status === 'fulfilled').map((q) => q.value);
   if (!ok.length) throw new Error('No Aerodrome quote');
@@ -79,6 +79,7 @@ async function quoteAero(tokenOut, amountIn, tickSpacings) {
 }
 export const quoteEurc = (amountIn) => quoteAero(EURC_BASE, amountIn, AERO_TICK_SPACINGS);
 export const quoteTopUp = () => quoteAero(WETH_BASE, TOPUP_USDC, AERO_WETH_TICK_SPACINGS);
+export const quoteUsdcFromEurc = (amountIn) => quoteAero(USDC_BASE, amountIn, AERO_TICK_SPACINGS, EURC_BASE);
 
 // { usdc, eurc, eth, gasPrice } for a Base address.
 export async function baseBalances(address) {
@@ -244,7 +245,7 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
 // Burn `amount` USDC from the signer for minting on `destinationDomain` to `mintRecipient` (bytes32 hex),
 // with Circle's forwarding hook so Circle mints on the other chain. Approves TokenMessengerV2 first if
 // needed and simulates the burn before asking the wallet. Resolves to the burn transaction hash.
-export async function burnUsdc({ signer, amount, destinationDomain, mintRecipient, maxFee, minFinalityThreshold, hookData, setStatus, inWallet, onApproved }) {
+export async function burnUsdc({ signer, amount, destinationDomain, mintRecipient, maxFee, minFinalityThreshold, hookData, setStatus, inWallet }) {
   const { address: account, wallet } = signer;
   const balance = await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] });
   if (balance < amount) throw new Error(`Only ${Number(balance) / 1e6} USDC in the Base wallet.`);
@@ -253,18 +254,7 @@ export async function burnUsdc({ signer, amount, destinationDomain, mintRecipien
   }
   await signer.ensureBase();
 
-  const allowance = () => baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER] });
-  if ((await allowance()) < amount) {
-    setStatus(`Confirm the USDC approval for Circle's TokenMessenger ${inWallet()}…`);
-    await sendWatched({
-      account, label: 'Approval', setStatus,
-      send: () => wallet.writeContract({ account, address: USDC_BASE, abi: erc20Abi, functionName: 'approve', args: [TOKEN_MESSENGER, amount] }),
-      check: async () => (await allowance()) >= amount,
-    });
-    // Wallets simulate before showing a transaction; one whose node is a block behind says it "will fail".
-    await waitBlocks(2);
-  }
-  onApproved?.();
+  await approveIfNeeded({ signer, token: USDC_BASE, spender: TOKEN_MESSENGER, amount, what: "USDC approval for Circle's TokenMessenger", setStatus, inWallet });
 
   const args = [amount, destinationDomain, mintRecipient, USDC_BASE, zeroHash, maxFee, minFinalityThreshold, hookData];
   // Fails here (with the contract's reason) rather than in the wallet.
@@ -278,4 +268,50 @@ export async function burnUsdc({ signer, amount, destinationDomain, mintRecipien
       .find((l) => l.args.amount === amount)?.transactionHash,
   });
   return r.transactionHash;
+}
+
+// Approve `spender` for `amount` of `token` unless already allowed.
+async function approveIfNeeded({ signer, token, spender, amount, what, setStatus, inWallet }) {
+  const { address: account, wallet } = signer;
+  const allowance = () => baseClient.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [account, spender] });
+  if ((await allowance()) >= amount) return;
+  setStatus(`Confirm the ${what} ${inWallet()}…`);
+  await sendWatched({
+    account, label: 'Approval', setStatus,
+    send: () => wallet.writeContract({ account, address: token, abi: erc20Abi, functionName: 'approve', args: [spender, amount] }),
+    check: async () => (await allowance()) >= amount,
+  });
+  // Wallets simulate before showing a transaction; one whose node is a block behind says it "will fail".
+  await waitBlocks(2);
+}
+
+// Swap `amountIn` EURC to USDC on Aerodrome for the signer (before burning it to Solana).
+// Resolves to { usdcOut, hash }.
+export async function swapEurcToUsdc({ signer, amountIn, setStatus, inWallet }) {
+  const { address: account, wallet } = signer;
+  const balance = await baseClient.readContract({ address: EURC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] });
+  if (balance < amountIn) throw new Error(`Only ${Number(balance) / 1e6} EURC in the Base wallet.`);
+  if ((await baseClient.getBalance({ address: account })) === 0n) {
+    throw new Error('You need a little ETH on Base to pay gas. Add some ETH to the Base wallet and retry.');
+  }
+  await signer.ensureBase();
+  await approveIfNeeded({ signer, token: EURC_BASE, spender: AERO_ROUTER, amount: amountIn, what: 'EURC approval for Aerodrome', setStatus, inWallet });
+
+  const { amountOut, tickSpacing } = await quoteUsdcFromEurc(amountIn);
+  const deadline = (await baseClient.getBlock()).timestamp + 20n * 60n;
+  const args = [{ tokenIn: EURC_BASE, tokenOut: USDC_BASE, tickSpacing, recipient: account, deadline, amountIn, amountOutMinimum: minOut(amountOut), sqrtPriceLimitX96: 0n }];
+  setStatus(`Confirm the swap of ${Number(amountIn) / 1e6} EURC for about ${Number(amountOut) / 1e6} USDC ${inWallet()}…`);
+  const fromBlock = await baseClient.getBlockNumber();
+  const r = await sendWatched({
+    account, label: 'Swap', setStatus,
+    send: () => wallet.writeContract({ account, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle', args }),
+    // The swap's EURC leaving the wallet.
+    check: async () => (await baseClient.getLogs({ address: EURC_BASE, event: transferEvent, args: { from: account }, fromBlock }))
+      .find((l) => l.args.value === amountIn)?.transactionHash,
+  });
+  const usdcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
+    .filter((l) => l.address.toLowerCase() === USDC_BASE.toLowerCase() && l.args.to === account)
+    .reduce((sum, l) => sum + l.args.value, 0n);
+  if (!usdcOut) throw new Error('The swap delivered no USDC');
+  return { usdcOut, hash: r.transactionHash };
 }

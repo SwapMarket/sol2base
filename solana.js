@@ -158,12 +158,12 @@ export function buildReclaimTx({ owner, eventAccount, attestation, message, bloc
   return new VersionedTransaction(new TransactionMessage({ payerKey: owner, recentBlockhash: blockhash, instructions: [ix] }).compileToV0Message());
 }
 
-// ---------- Jupiter (USDT → USDC) ----------
+// ---------- Jupiter (USDT ↔ USDC) ----------
 
 const JUPITER = 'https://lite-api.jup.ag/swap/v1';
 
-export async function jupiterQuote(amountIn, slippageBps) {
-  const res = await fetch(`${JUPITER}/quote?inputMint=${USDT_MINT}&outputMint=${USDC_MINT}&amount=${amountIn}&slippageBps=${slippageBps}`);
+export async function jupiterQuote(amountIn, slippageBps, inputMint = USDT_MINT, outputMint = USDC_MINT) {
+  const res = await fetch(`${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountIn}&slippageBps=${slippageBps}`);
   const q = await res.json();
   if (!q.outAmount) throw new Error(q.error || 'No Jupiter quote');
   return q;
@@ -193,20 +193,20 @@ const tokenAmount = (acct) => {
   return new DataView(bytes.buffer).getBigUint64(64, true);
 };
 
-// Simulate a Jupiter swap and check it does what was quoted: the owner's USDT goes down by exactly
-// amountIn and their USDC goes up by at least minOut. Returns the simulated USDC received.
-export async function checkSwapBySimulation(rpc, tx, owner, amountIn, minOut) {
-  const usdtAta = ata(owner, USDT_MINT), usdcAta = ata(owner, USDC_MINT);
-  const before = await rpc('getMultipleAccounts', [[usdtAta.toBase58(), usdcAta.toBase58()], { encoding: 'base64' }]);
+// Simulate a Jupiter swap and check it does what was quoted: the owner's input token goes down by exactly
+// amountIn and their output token goes up by at least minOut. Returns the simulated amount received.
+export async function checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint = USDT_MINT, outMint = USDC_MINT) {
+  const inAta = ata(owner, inMint), outAta = ata(owner, outMint);
+  const before = await rpc('getMultipleAccounts', [[inAta.toBase58(), outAta.toBase58()], { encoding: 'base64' }]);
   const sim = await rpc('simulateTransaction', [btoa(String.fromCharCode(...tx.serialize())), {
     encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true,
-    accounts: { encoding: 'base64', addresses: [usdtAta.toBase58(), usdcAta.toBase58()] },
+    accounts: { encoding: 'base64', addresses: [inAta.toBase58(), outAta.toBase58()] },
   }]);
   if (sim.value.err) throw new Error(`Swap simulation failed: ${JSON.stringify(sim.value.err)}`);
-  const [usdtBefore, usdcBefore] = before.value.map(tokenAmount);
-  const [usdtAfter, usdcAfter] = sim.value.accounts.map(tokenAmount);
-  const received = usdcAfter - usdcBefore;
-  if (usdtBefore - usdtAfter !== amountIn || received < minOut) throw new Error('Jupiter swap failed the safety checks');
+  const [inBefore, outBefore] = before.value.map(tokenAmount);
+  const [inAfter, outAfter] = sim.value.accounts.map(tokenAmount);
+  const received = outAfter - outBefore;
+  if (inBefore - inAfter !== amountIn || received < minOut) throw new Error('Jupiter swap failed the safety checks');
   return received;
 }
 

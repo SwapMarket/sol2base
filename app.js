@@ -7,7 +7,7 @@ const FINALITY = { fast: 1000, standard: 2000 };
 const SLIPPAGE_BPS = 50; // 0.5%
 // Paying with USDT, the swap takes a moment during which Circle's fee can move a little.
 // Accept a rise up to this much then instead of stopping after the swap (paying with USDC: none).
-const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC
+const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC (also used paying with EURC, Base → Solana)
 // SOL the transfer needs: rent for the account where CCTP records the message (0.00299 SOL,
 // reclaimable after 5 days), network fees, and for USDT the swap fee plus a USDC account if missing.
 const LAMPORTS = { eventRent: 2_990_000n, fees: 100_000n, swap: 600_000n, usdcAccount: 2_040_000n };
@@ -25,6 +25,9 @@ const BASE_WALLET_KEY = 'sol2base:baseWallet'; // 'injected' when an extension B
 // (Its name must not contain "walletconnect", "wc@", "wc_" or "wallet_connect": WalletConnect moves such
 // localStorage keys into its IndexedDB and deletes them.)
 const WC_KEY = 'sol2base:qrSession';
+// Set when the user disconnected the Solana wallet, so a wallet that remembers this site isn't
+// reconnected silently on the next load; cleared by connecting again.
+const SOL_OFF_KEY = 'sol2base:solDisconnected';
 // Public Solana RPCs that answer browser requests; the first one that works is used.
 const RPCS = ['https://solana-rpc.publicnode.com', 'https://api.mainnet-beta.solana.com'];
 // Reown (WalletConnect) project, shared with eth2base; Solana mainnet's CAIP-2 chain id.
@@ -48,6 +51,8 @@ let topUpTouched = false; // the user ticked/unticked the top-up; otherwise it f
 let preferredOut = 'USDC'; // the user's choice; EURC is re-selected once a Base wallet makes it available
 let topUpEth = null; // ETH that B.TOPUP_USDC buys right now, for the label
 let pendingSwap = null; // { amountIn, to, topUp, sent, sentAmount, before, fee } for the EURC swap
+let pendingUsdt = null; // { amountIn, owner, sent, before, fee } for the USDC → USDT swap on Solana (Base → Solana)
+let preferredOutS = 'USDC'; // Base → Solana: the user's choice; USDT is re-selected once a Solana wallet makes it available
 // Pre-tick the top-up when Base ETH covers fewer than this many EURC swaps at the current gas price.
 const TOPUP_BELOW_SWAPS = 4n;
 
@@ -63,6 +68,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
 const errMsg = (e) => e?.shortMessage || e?.message || String(e);
 const currentDir = () => document.querySelector('input[name=dir]:checked').value;
+const currentSrcB = () => document.querySelector('input[name=srcB]:checked').value; // Base → Solana: USDC or EURC
+const currentOutS = () => document.querySelector('input[name=outS]:checked').value; // Base → Solana: USDC or USDT
 const currentMode = () => document.querySelector('input[name=mode]:checked').value;
 const currentSrc = () => document.querySelector('input[name=src]:checked').value;
 const currentOut = () => document.querySelector('input[name=out]:checked').value;
@@ -198,12 +205,16 @@ function resetSteps(dir = currentDir()) {
     li.querySelector('.elapsed')?.remove();
   }
   const toSol = dir === 'toSol';
-  document.querySelector('#steps .src-chain').textContent = toSol ? 'Base' : 'Solana';
-  document.querySelector('#steps .dst-chain').textContent = toSol ? 'Solana' : 'Base';
-  document.querySelector('#steps li[data-step="swapIn"]').hidden = toSol || currentSrc() !== 'USDT';
-  document.querySelector('#steps li[data-step="swap"]').hidden = toSol || currentOut() !== 'EURC';
+  const step = (name) => document.querySelector(`#steps li[data-step="${name}"]`);
+  step('swapIn').textContent = toSol ? 'Swap EURC to USDC on Aerodrome' : 'Swap USDT to USDC';
+  step('burn').textContent = `Burn USDC on ${toSol ? 'Base' : 'Solana'}`;
+  step('mint').textContent = `Circle mints on ${toSol ? 'Solana' : 'Base'}`;
+  step('swap').textContent = toSol ? 'Swap USDC to USDT on Jupiter' : 'Swap USDC to EURC on Aerodrome';
+  step('swapIn').hidden = toSol ? currentSrcB() !== 'EURC' : currentSrc() !== 'USDT';
+  step('swap').hidden = toSol ? currentOutS() !== 'USDT' : currentOut() !== 'EURC';
   $('retrySwap').hidden = true;
   pendingSwap = null;
+  pendingUsdt = null;
   $('progress').hidden = false;
 }
 
@@ -400,50 +411,119 @@ function refreshForm() {
   $('bridge').textContent = label;
 }
 
-// The form for Base → Solana: USDC from the connected Base wallet to a Solana wallet.
+// Quotes for Base → Solana, by kind and input amount: { value } or { error }, refreshed after 30 s.
+// A request waits 400 ms (typing), and only the latest one per kind is fetched.
+const quoteCache = new Map();
+const quoteWanted = {};
+function quoteFor(kind, amount, fetcher) {
+  const key = `${kind}:${amount}`;
+  const q = quoteCache.get(key);
+  if ((!q || Date.now() - q.at > 30_000) && quoteWanted[kind] !== key) {
+    quoteWanted[kind] = key;
+    setTimeout(async () => {
+      if (quoteWanted[kind] !== key) return;
+      try {
+        quoteCache.set(key, { value: await fetcher(), at: Date.now() });
+      } catch (e) {
+        const old = quoteCache.get(key);
+        if (old?.value) old.at = Date.now(); // keep showing it; retry later
+        else quoteCache.set(key, { error: true, at: Date.now() });
+      }
+      if (quoteWanted[kind] === key) quoteWanted[kind] = null;
+      refreshForm();
+    }, 400);
+  }
+  return q;
+}
+const eurcInQuote = (amount) => quoteFor('eurcIn', amount, () => B.quoteUsdcFromEurc(amount));
+const usdtOutQuote = (amount) => quoteFor('usdtOut', amount, () => S.jupiterQuote(amount, SLIPPAGE_BPS, S.USDC_MINT, S.USDT_MINT));
+
+// SOL the Solana wallet needs to swap the minted USDC to USDT: fees, plus a USDT account if missing.
+const solForUsdt = () => LAMPORTS.fees + LAMPORTS.swap + (bal?.usdtAccount ? 0n : LAMPORTS.usdcAccount);
+
+// The form for Base → Solana: USDC (or EURC, swapped first) from the connected Base wallet to a Solana
+// wallet, received as USDC (or USDT, swapped by the connected Solana wallet).
 function refreshFormToSol() {
-  const typed = $('recipientSol').value.trim();
-  const dest = solRecipient();
+  const srcB = currentSrcB();
+  // USDT needs the connected Solana wallet: the USDC is minted to it, and it signs the swap.
+  const usdtRadio = document.querySelector('input[name=outS][value=USDT]');
+  usdtRadio.disabled = !owner;
+  if (owner && preferredOutS === 'USDT') usdtRadio.checked = true;
+  if (!owner && usdtRadio.checked) document.querySelector('input[name=outS][value=USDC]').checked = true;
+  const out = currentOutS();
+  $('usdtHint').textContent = owner ? '· your Solana wallet receives it and signs the swap; needs a little SOL' : '· needs a connected Solana wallet with a little SOL';
+  const toOwner = out === 'USDT';
+  $('recipientSol').hidden = toOwner;
+
+  const typed = toOwner ? '' : $('recipientSol').value.trim();
+  const dest = toOwner ? owner : solRecipient();
   if (dest) checkSolDest(dest);
   const d = dest && solDest?.addr === dest.toBase58() && !solDest.pending ? solDest : null;
-  $('recipientLabel').textContent = 'Recipient on Solana';
+  $('recipientLabel').textContent = toOwner ? 'USDT recipient on Solana' : 'Recipient on Solana';
   $('recipientSol').placeholder = owner ? `defaults to your Solana wallet ${short(owner.toBase58())}` : 'your Solana wallet address';
+  const name = wallet?.name ?? 'wallet';
   const who = !dest ? ''
-    : !typed ? `Using your connected Solana wallet (${wallet?.name ?? 'wallet'}).`
-      : owner && dest.equals(owner) ? `This is your connected Solana wallet (${wallet?.name ?? 'wallet'}).`
-        : 'Make sure you control this address on Solana.';
+    : toOwner ? `Your connected Solana wallet (${name}, ${short(dest.toBase58())}): the USDC is minted to it, and it signs the swap.`
+      : !typed ? `Using your connected Solana wallet (${name}).`
+        : owner && dest.equals(owner) ? `This is your connected Solana wallet (${name}).`
+          : 'Make sure you control this address on Solana.';
   const setupFee = allFees ? allFees.toSolSetup[currentMode()].forward - allFees.toSol[currentMode()].forward : 0n;
   const account = !d ? ''
     : d.tokenAccount ? ' This is a token account, not a wallet: enter the wallet address.'
-      : d.needsAccount ? ` It has no USDC account yet: Circle creates one, which adds about ${fmt(setupFee)} USDC to the fee. No SOL needed.` : '';
+      : d.needsAccount ? ` It has no USDC account yet: Circle creates one, which adds about ${fmt(setupFee)} USDC to the fee.${toOwner ? '' : ' No SOL needed.'}` : '';
   $('recipientHint').textContent = who + account;
-  $('amountLabel').textContent = 'Amount (USDC)';
+  $('amountLabel').textContent = `Amount (${srcB})`;
 
   const amt = parseAmount();
+  let usdc = amt;
+  let eurcNote = '';
+  let eq = null;
+  if (srcB === 'EURC' && amt) {
+    eq = eurcInQuote(amt);
+    usdc = eq?.value ? eq.value.amountOut : null;
+    if (usdc) eurcNote = `${fmt(amt)} EURC → about ${fmt(usdc)} USDC via Aerodrome`;
+  }
+  const tolerance = srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n;
   for (const mode of ['fast', 'standard']) {
-    $(mode === 'fast' ? 'feeFast' : 'feeStd').textContent = allFees ? `· fee ≤ ${fmt(maxFeeFor(amt ?? 0n, mode, feesFor(allFees, d)))} USDC` : '';
+    $(mode === 'fast' ? 'feeFast' : 'feeStd').textContent = allFees ? `· fee ≤ ${fmt(maxFeeFor(usdc ?? 0n, mode, feesFor(allFees, d)) + tolerance)} USDC` : '';
   }
 
   let label = 'Bridge to Solana';
   let ok = false;
   let receive = '';
   let warn = '';
-  const gas = baseBal ? B.GAS_UNITS.burn * baseBal.gasPrice : 0n;
+  const gas = baseBal ? (B.GAS_UNITS.burn + (srcB === 'EURC' ? B.GAS_UNITS.swap : 0n)) * baseBal.gasPrice : 0n;
   if (!allFees) label = 'Loading fees…';
   else if (!evm) label = 'Connect a Base wallet';
   else if (!amt) label = 'Enter an amount';
+  else if (!usdc) label = eq?.error ? 'No EURC → USDC route right now' : 'Getting EURC → USDC quote…';
   else if (!dest) label = typed ? 'Recipient is not a valid Solana address' : 'Enter the Solana recipient';
   else if (!d) label = 'Checking the recipient on Solana…';
   else if (d.tokenAccount) label = 'Enter a wallet address, not a token account';
   else {
-    const fee = maxFeeFor(amt, currentMode(), feesFor(allFees, d));
-    if (amt <= fee) label = 'Amount must be larger than the fee';
-    else if (baseBal && amt > baseBal.usdc) label = 'Insufficient USDC on Base';
+    const fee = maxFeeFor(usdc, currentMode(), feesFor(allFees, d));
+    const minted = usdc - fee;
+    if (minted <= 0n) label = 'Amount must be larger than the fee';
+    else if (baseBal && amt > (srcB === 'EURC' ? baseBal.eurc : baseBal.usdc)) label = `Insufficient ${srcB} on Base`;
     else if (baseBal && baseBal.eth < gas) {
       label = 'Not enough ETH on Base';
       warn = `This needs about ${fmtEth(gas)} ETH on Base for gas; you have ${fmtEth(baseBal.eth)}.`;
-    } else ok = !!baseBal;
-    if (amt > fee) receive = `You receive at least ${fmt(amt - fee)} USDC on Solana${d.needsAccount ? ', in a USDC account Circle creates for the recipient' : ''}`;
+    } else if (toOwner && bal && bal.sol < solForUsdt()) {
+      label = 'Not enough SOL for the USDT swap';
+      warn = `The USDT swap needs about ${fmtSol(solForUsdt())} SOL in your Solana wallet (network fees${bal.usdtAccount ? '' : ' and a USDT account'}); you have ${fmtSol(bal.sol)}.`;
+    } else ok = !!baseBal && (!toOwner || !!bal);
+    const created = d.needsAccount ? ', in a USDC account Circle creates for the recipient' : '';
+    if (minted > 0n && toOwner) {
+      const uq = usdtOutQuote(minted);
+      if (uq?.value) {
+        receive = `You receive about ${fmt(BigInt(uq.value.outAmount))} USDT on Solana (${eurcNote ? `${eurcNote}, then ` : ''}Circle's fee, then ${fmt(minted)} USDC → USDT via Jupiter, max 0.5% slippage)`;
+      } else {
+        receive = uq?.error ? 'No USDC → USDT route on Jupiter right now.' : 'Getting USDC → USDT quote…';
+        if (uq?.error) ok = false;
+      }
+    } else if (minted > 0n) {
+      receive = eurcNote ? `You receive about ${fmt(minted)} USDC on Solana${created} (${eurcNote}, then Circle's fee)` : `You receive at least ${fmt(minted)} USDC on Solana${created}`;
+    }
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
   shownQuoteKey = null;
@@ -479,23 +559,29 @@ async function connectStandard(w, silent) {
       const [{ signedTransaction }] = await w.features['solana:signTransaction'].signTransaction({ account, transaction: tx.serialize(), chain: 'solana:mainnet' });
       return S.VersionedTransaction.deserialize(signedTransaction);
     },
+    disconnect: () => w.features['standard:disconnect']?.disconnect(),
   };
   setOwner(new S.PublicKey(account.address));
-  w.features['standard:events']?.on('change', ({ accounts }) => {
+  const off = w.features['standard:events']?.on('change', ({ accounts }) => {
     if (accounts) setOwner(accounts[0] ? new S.PublicKey(accounts[0].address) : null);
   });
+  const disconnect = wallet.disconnect;
+  wallet.disconnect = async () => { off?.(); await disconnect(); };
 }
 
+const onAccount = (pk) => setOwner(pk ? new S.PublicKey(pk.toString()) : null);
+const onDisconnect = () => setOwner(null);
 async function connectInjected(p, silent) {
   const res = await p.connect(silent ? { onlyIfTrusted: true } : undefined);
   const pk = res?.publicKey ?? p.publicKey;
   wallet = {
     name: p.isPhantom ? 'Phantom' : p.isSolflare ? 'Solflare' : 'wallet',
     signTransaction: async (tx) => S.VersionedTransaction.deserialize((await p.signTransaction(tx)).serialize()),
+    disconnect: async () => { p.off?.('accountChanged', onAccount); p.off?.('disconnect', onDisconnect); await p.disconnect?.(); },
   };
   setOwner(pk ? new S.PublicKey(pk.toString()) : null);
-  p.on?.('accountChanged', (pk) => setOwner(pk ? new S.PublicKey(pk.toString()) : null));
-  p.on?.('disconnect', () => setOwner(null));
+  p.on?.('accountChanged', onAccount);
+  p.on?.('disconnect', onDisconnect);
 }
 
 // Base58 → bytes (for signatures returned over WalletConnect).
@@ -573,6 +659,7 @@ function useWalletConnectSession(client, session) {
   const address = session.namespaces.solana.accounts[0].split(':')[2];
   const pk = new S.PublicKey(address);
   wallet = {
+    wc: true,
     name: session.peer.metadata.name,
     signTransaction: async (tx) => {
       const res = await client.request({
@@ -590,13 +677,53 @@ function useWalletConnectSession(client, session) {
         request: { method: 'solana_signAndSendTransaction', params: { transaction: b64(tx.serialize()) } },
       })).signature
       : null,
+    disconnect: () => disconnectWalletConnect(client, session.topic),
   };
   setOwner(pk);
   const baseAccount = session.namespaces.eip155?.accounts.find((a) => a.startsWith('eip155:8453:'));
-  if (baseAccount) setEvm({ ...B.walletConnectBaseWallet(client, session.topic, baseAccount.split(':')[2]), name: session.peer.metadata.name });
+  if (baseAccount) {
+    setEvm({
+      ...B.walletConnectBaseWallet(client, session.topic, baseAccount.split(':')[2]), name: session.peer.metadata.name,
+      disconnect: () => disconnectWalletConnect(client, session.topic),
+    });
+  }
+}
+
+// Ends the WalletConnect session, which covers both chains.
+async function disconnectWalletConnect(client, topic) {
+  try { localStorage.removeItem(WC_KEY); } catch {}
+  try {
+    await client.disconnect({ topic, reason: { code: 6000, message: 'User disconnected' } });
+  } catch (e) {
+    console.warn('walletconnect disconnect', e);
+  }
+  if (wallet?.wc) { wallet = null; setOwner(null); }
+  if (evm) setEvm(null);
+}
+
+async function disconnectSolana() {
+  if (busy || !wallet) return;
+  try { localStorage.setItem(SOL_OFF_KEY, '1'); } catch {}
+  const w = wallet;
+  wallet = null;
+  setOwner(null);
+  try { await w.disconnect?.(); } catch (e) { console.warn('disconnect', e); }
+}
+
+async function disconnectBase() {
+  if (busy || !evm) return;
+  const e = evm;
+  try { localStorage.removeItem(BASE_WALLET_KEY); } catch {}
+  setEvm(null);
+  if (e.disconnect) return e.disconnect();
+  // Extension wallets: ask them to forget this site where supported (MetaMask, Rabby); otherwise it only
+  // stops using the wallet here.
+  try { await window.ethereum?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); } catch {}
 }
 
 async function connect(silent = false) {
+  if (silent) { try { if (localStorage.getItem(SOL_OFF_KEY)) return; } catch {} }
+  else { try { localStorage.removeItem(SOL_OFF_KEY); } catch {} }
   if (standardWallets.length) return connectStandard(standardWallets[0], silent);
   const p = findInjected();
   if (p) return connectInjected(p, silent);
@@ -606,8 +733,9 @@ async function connect(silent = false) {
 function setOwner(pk) {
   owner = pk;
   $('account').textContent = owner ? `Connected${wallet?.name ? ` (${wallet.name})` : ''}: ${short(owner.toBase58())}` : 'Not connected';
-  $('connect').textContent = owner ? 'Connected' : 'Connect Solana wallet';
-  $('connect').disabled = !!owner;
+  $('connect').textContent = owner ? 'Disconnect' : 'Connect Solana wallet';
+  $('connect').classList.toggle('ghost', !!owner);
+  $('connect').title = owner && wallet?.wc ? 'Ends the WalletConnect session (Solana and Base)' : '';
   $('connectQr').hidden = !!owner;
   $('balances').hidden = !owner;
   $('noWallet').hidden = true;
@@ -624,7 +752,7 @@ async function refreshBalances() {
       rpc('getMultipleAccounts', [[usdcAta, usdtAta], { encoding: 'base64', commitment: 'confirmed' }]),
       rpc('getBalance', [owner.toBase58(), { commitment: 'confirmed' }]),
     ]);
-    bal = { usdc: tokenAmount(accts[0]) ?? 0n, usdt: tokenAmount(accts[1]) ?? 0n, sol: BigInt(sol), usdcAccount: !!accts[0] };
+    bal = { usdc: tokenAmount(accts[0]) ?? 0n, usdt: tokenAmount(accts[1]) ?? 0n, sol: BigInt(sol), usdcAccount: !!accts[0], usdtAccount: !!accts[1] };
     $('balUsdc').textContent = fmt(bal.usdc);
     $('balUsdt').textContent = fmt(bal.usdt);
     $('balSol').textContent = fmtSol(bal.sol);
@@ -642,13 +770,23 @@ async function connectBase() {
   const w = await B.injectedBaseWallet(window.ethereum);
   setEvm({ ...w, name: window.ethereum.isRabby ? 'Rabby' : window.ethereum.isPhantom ? 'Phantom' : window.ethereum.isMetaMask ? 'MetaMask' : 'your Base wallet' });
   try { localStorage.setItem(BASE_WALLET_KEY, 'injected'); } catch {}
-  window.ethereum.on?.('accountsChanged', (accs) => (accs[0] ? connectBase() : setEvm(null)));
+  if (!baseListening) {
+    baseListening = true;
+    // Follow account switches in the extension, unless the user disconnected it here.
+    window.ethereum.on?.('accountsChanged', (accs) => {
+      if (!evm || evm.disconnect) return;
+      if (accs[0]) connectBase(); else setEvm(null);
+    });
+  }
 }
+let baseListening = false;
 
 function setEvm(e) {
   evm = e;
   $('evmAccount').textContent = evm ? `Base wallet (${evm.name}): ${short(evm.address)}` : 'Base wallet: not connected (needed for EURC)';
   $('connectBase').hidden = !!evm;
+  $('disconnectBase').hidden = !evm;
+  $('disconnectBase').title = evm?.disconnect ? 'Ends the WalletConnect session (Solana and Base)' : '';
   if (evm) $('noBaseWallet').hidden = true;
   $('baseBalances').hidden = !evm;
   refreshBaseBalances();
@@ -738,24 +876,30 @@ function explain(e) {
 
 // ---------- flow ----------
 
-// Swap USDT → USDC with Jupiter after checking the swap by simulation. Resolves to the USDC received.
-async function swapUsdtToUsdc(amountIn) {
-  setStep('swapIn', 'active');
+// Swap with Jupiter from the connected Solana wallet, after checking the swap by simulation.
+// Resolves to the amount of outMint received. Only for USDT ↔ USDC (checked against 1:1).
+async function jupiterSwap(inMint, outMint, amountIn, [inName, outName]) {
   setStatus('Getting a Jupiter route…');
-  const quote = await S.jupiterQuote(amountIn, SLIPPAGE_BPS);
+  const quote = await S.jupiterQuote(amountIn, SLIPPAGE_BPS, inMint, outMint);
   const minOut = BigInt(quote.otherAmountThreshold);
   // Sanity floor independent of Jupiter: USDT and USDC trade near 1:1.
   if (minOut < (amountIn * 98n) / 100n) throw new Error('Jupiter quote is too far from 1:1');
   const { tx, lastValidBlockHeight } = await S.jupiterSwapTx(quote, owner);
-  await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut);
-  const before = tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
-  setStatus(`Confirm the swap of ${fmt(amountIn)} USDT for about ${fmt(BigInt(quote.outAmount))} USDC ${inWallet()}…`);
-  const usdcNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, S.USDC_MINT).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
-  if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await usdcNow()) >= before + minOut);
+  await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint, outMint);
+  const outNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[S.ata(owner, outMint).toBase58()], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
+  const before = await outNow();
+  setStatus(`Confirm the swap of ${fmt(amountIn)} ${inName} for about ${fmt(BigInt(quote.outAmount))} ${outName} ${inWallet()}…`);
+  if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await outNow()) >= before + minOut);
   else await signAndSend(tx, lastValidBlockHeight, 'Swap');
-  const after = await usdcNow();
-  const received = after - before;
-  if (received <= 0n) throw new Error('The swap delivered no USDC');
+  const received = (await outNow()) - before;
+  if (received <= 0n) throw new Error(`The swap delivered no ${outName}`);
+  return received;
+}
+
+// Swap USDT → USDC (Solana → Base, paying with USDT). Resolves to the USDC received.
+async function swapUsdtToUsdc(amountIn) {
+  setStep('swapIn', 'active');
+  const received = await jupiterSwap(S.USDT_MINT, S.USDC_MINT, amountIn, ['USDT', 'USDC']);
   setStep('swapIn', 'done');
   return received;
 }
@@ -830,61 +974,126 @@ async function bridge() {
   }
 }
 
-// Base → Solana: burn on Base with the forwarding hook; Circle mints on Solana (creating the
-// recipient's USDC account first if needed, paid from its fee).
+// Base → Solana: optionally swap EURC → USDC on Aerodrome, burn on Base with the forwarding hook, and
+// Circle mints on Solana (creating the recipient's USDC account first if needed, paid from its fee);
+// optionally the Solana wallet then swaps the USDC to USDT.
 async function bridgeToSolana() {
-  const amount = parseAmount();
-  const dest = solRecipient();
+  let amount = parseAmount();
+  const srcB = currentSrcB();
+  const out = currentOutS();
+  const dest = out === 'USDT' ? owner : solRecipient();
   if (!amount || !allFees || !dest || !evm) return;
+  const shownUsdc = srcB === 'EURC' ? quoteCache.get(`eurcIn:${amount}`)?.value?.amountOut : amount;
+  if (!shownUsdc) return;
   await askNotifications();
   const mode = currentMode();
-  try { if ($('recipientSol').value.trim()) localStorage.setItem(RECIPIENT_SOL_KEY, dest.toBase58()); } catch {}
-  const shownFee = maxFeeFor(amount, mode, feesFor(allFees, solDest));
+  try { if (out !== 'USDT' && $('recipientSol').value.trim()) localStorage.setItem(RECIPIENT_SOL_KEY, dest.toBase58()); } catch {}
+  // Never charge more than the fee the user saw (plus a little when the amount comes from a swap).
+  const shownFee = maxFeeFor(shownUsdc, mode, feesFor(allFees, solDest)) + (srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n);
 
   $('bridge').disabled = true;
   resetSteps('toSol');
   busy = true;
+  let source = null; // { amount } when paid with EURC
+  let unburned = null; // USDC from the EURC swap that hasn't been burned yet
   try {
+    if (srcB === 'EURC') {
+      setStep('swapIn', 'active');
+      const r = await B.swapEurcToUsdc({ signer: evm, amountIn: amount, setStatus, inWallet: inBaseWallet });
+      source = { amount, hash: r.hash };
+      amount = r.usdcOut;
+      unburned = amount;
+      setStep('swapIn', 'done');
+      refreshBaseBalances();
+    }
+
     setStep('burn', 'active');
     setStatus('Checking the recipient and the current fee…');
     // The account may have been created (or closed) since the form looked; decide on what's there now.
     const [d] = await Promise.all([lookupSolDest(dest), loadFees().then((ok) => { if (!ok) throw new Error('Could not load current fees from Circle. Try again.'); })]);
     if (d.tokenAccount) throw new Error('The recipient is a token account, not a wallet. Enter the wallet address.');
     const maxFee = maxFeeFor(amount, mode, feesFor(allFees, d));
-    if (maxFee > shownFee) throw new Error(`Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
-    if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
+    const swapped = source ? `Swapped to ${fmt(amount)} USDC. ` : '';
+    if (maxFee > shownFee) throw new Error(`${swapped}Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
+    if (amount <= maxFee) throw new Error(`${swapped}Amount must be larger than the fee.`);
 
     const hash = await B.burnUsdc({
       signer: evm, amount, destinationDomain: S.DOMAIN_SOLANA, mintRecipient: S.usdcMintRecipient(dest),
       maxFee, minFinalityThreshold: FINALITY[mode], hookData: S.solanaForwardHook(dest, d.needsAccount),
       setStatus, inWallet: inBaseWallet,
     });
-    savePending({ sig: hash, dir: 'toSol', to: dest.toBase58() });
+    unburned = null;
+    savePending({ sig: hash, dir: 'toSol', to: dest.toBase58(), out });
     setStep('burn', 'done');
     refreshBaseBalances();
-    finishToSol(await track(hash, mode, 'toSol'), dest.toBase58());
+    await finishToSol(await track(hash, mode, 'toSol'), dest.toBase58(), out, source);
   } catch (e) {
     console.error(e);
     setStatus(explain(e), 'err');
+    // Stopped after the EURC swap but before the burn: set the form to bridge that USDC.
+    if (unburned) {
+      document.querySelector('input[name=srcB][value=USDC]').checked = true;
+      $('amount').value = (Number(unburned) / 1e6).toFixed(6).replace(/\.?0+$/, '');
+    }
   } finally {
     busy = false;
     refreshForm();
   }
 }
 
-function finishToSol(m, to) {
-  clearPending();
+async function finishToSol(m, to, out = 'USDC', source = null) {
+  // A USDT transfer stays saved (for Resume after a reload) until its swap is done.
+  if (out !== 'USDT') clearPending();
   refreshBalances();
   refreshBaseBalances();
   solDest = null; // the recipient now has a USDC account
   const link = solTx(m.forwardTxHash);
   const body = m.decodedMessage?.decodedMessageBody;
-  if (!body?.amount) { setStatus(`Done! USDC minted on Solana ${link}.`, 'ok'); return; }
+  if (!body?.amount) {
+    setStatus(out === 'USDT' ? `USDC minted on Solana ${link}, but the transfer amount couldn't be read, so no swap was made.` : `Done! USDC minted on Solana ${link}.`, out === 'USDT' ? 'err' : 'ok');
+    return;
+  }
   const burned = BigInt(body.amount);
   const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
+  const minted = burned - fee;
   const account = new S.PublicKey(Uint8Array.from(body.mintRecipient.replace(/^0x/, '').match(/../g), (h) => parseInt(h, 16))).toBase58();
   const forWhom = to ? `for ${short(to)}` : `in USDC account ${short(account)}`;
-  setStatus(`Done! ${fmt(burned)} USDC → ${fmt(burned - fee)} USDC on Solana ${forWhom} ${link}. Circle's fee: ${fmt(fee)} USDC.`, 'ok');
+  const sent = source ? `${fmt(source.amount)} EURC` : `${fmt(burned)} USDC`;
+  const before = source ? `EURC → ${fmt(burned)} USDC via Aerodrome ${baseTx(source.hash)}, ` : '';
+  if (out !== 'USDT') {
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Solana ${forWhom} ${link}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.`, 'ok');
+    return;
+  }
+  if (!to) {
+    setStatus(`${fmt(minted)} USDC minted on Solana ${link}. Connect the Solana wallet it went to (USDC account ${short(account)}) and use Resume again with the burn transaction from the same browser to swap it to USDT.`, 'err');
+    return;
+  }
+  // Swap only what this transfer delivered, never other USDC in the wallet.
+  pendingUsdt = { amountIn: minted, owner: to, sent, before, fee };
+  setStatus(`${fmt(minted)} USDC minted on Solana ${link}. Now swapping to USDT…`);
+  await swapToUsdt();
+}
+
+// Swap the bridged USDC to USDT, signed by the Solana wallet it was minted to.
+async function swapToUsdt() {
+  const p = pendingUsdt;
+  if (!p) return;
+  $('retrySwap').hidden = true;
+  setStep('swap', 'active');
+  try {
+    if (!owner || owner.toBase58() !== p.owner) throw new Error(`The USDC went to ${short(p.owner)}. Connect that Solana wallet to swap.`);
+    const usdt = await jupiterSwap(S.USDC_MINT, S.USDT_MINT, p.amountIn, ['USDC', 'USDT']);
+    setStep('swap', 'done');
+    pendingUsdt = null;
+    clearPending();
+    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
+    refreshBalances();
+  } catch (e) {
+    console.error(e);
+    setStatus(`Swap failed: ${explain(e)} Your USDC is safe on Solana.`, 'err');
+    $('retrySwap').textContent = 'Swap to USDT';
+    $('retrySwap').hidden = false;
+  }
 }
 
 async function resume() {
@@ -893,10 +1102,13 @@ async function resume() {
   const same = saved?.sig === sig;
   if (/^0x[0-9a-fA-F]{64}$/.test(sig)) {
     await askNotifications();
+    const out = same ? saved.out ?? 'USDC' : 'USDC';
     resetSteps('toSol');
+    document.querySelector('#steps li[data-step="swapIn"]').hidden = true;
+    document.querySelector('#steps li[data-step="swap"]').hidden = out !== 'USDT';
     setStep('burn', 'done');
     try {
-      finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null);
+      await finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null, out);
     } catch (e) {
       console.error(e);
       setStatus(errMsg(e), 'err');
@@ -999,6 +1211,7 @@ async function swapToEurc() {
   } catch (e) {
     console.error(e);
     setStatus(`Swap failed: ${errMsg(e)} Your USDC is safe on Base.`, 'err');
+    $('retrySwap').textContent = 'Swap to EURC';
     $('retrySwap').hidden = false;
   }
 }
@@ -1136,7 +1349,7 @@ function saveForm() {
   const v = (name) => document.querySelector(`input[name=${name}]:checked`).value;
   try {
     localStorage.setItem(FORM_KEY, JSON.stringify({
-      dir: v('dir'), src: v('src'), amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
+      dir: v('dir'), src: v('src'), srcB: v('srcB'), outS: preferredOutS, amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
     }));
   } catch {}
 }
@@ -1147,6 +1360,8 @@ function loadForm() {
     const pick = (name, value) => { const el = document.querySelector(`input[name=${name}][value="${value}"]`); if (el) el.checked = true; };
     pick('dir', f.dir);
     pick('src', f.src);
+    pick('srcB', f.srcB);
+    if (f.outS === 'USDT') preferredOutS = 'USDT';
     pick('mode', f.mode);
     if (f.amount) $('amount').value = f.amount;
     preferredOut = f.out === 'EURC' ? 'EURC' : 'USDC';
@@ -1163,6 +1378,7 @@ function loadSaved() {
       $('resumeSig').closest('details').open = true;
       if (p.out === 'EURC') preferredOut = 'EURC';
       if (p.dir === 'toSol') document.querySelector('input[name=dir][value=toSol]').checked = true;
+      if (p.out === 'USDT') preferredOutS = 'USDT';
     }
     const to = localStorage.getItem(RECIPIENT_KEY);
     if (to) $('recipient').value = to;
@@ -1173,10 +1389,11 @@ function loadSaved() {
 
 // ---------- wire up ----------
 
-$('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
+$('connect').onclick = () => (owner ? disconnectSolana() : connect().catch((e) => alert(errMsg(e))));
+$('disconnectBase').onclick = disconnectBase;
 $('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(e)));
 $('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
-$('retrySwap').onclick = swapToEurc;
+$('retrySwap').onclick = () => (pendingUsdt ? swapToUsdt() : swapToEurc());
 $('sweep').onclick = sweep;
 $('reclaim').onclick = reclaim;
 $('topUp').onchange = () => { topUpTouched = true; refreshForm(); saveForm(); };
@@ -1195,15 +1412,16 @@ $('recipient').oninput = () => {
   try { if (!r) localStorage.removeItem(RECIPIENT_KEY); else if (isAddress(r)) localStorage.setItem(RECIPIENT_KEY, getAddress(r)); } catch {}
 };
 $('max').onclick = () => {
-  const max = currentDir() === 'toSol' ? baseBal?.usdc : bal && (currentSrc() === 'USDT' ? bal.usdt : bal.usdc);
+  const max = currentDir() === 'toSol' ? baseBal && (currentSrcB() === 'EURC' ? baseBal.eurc : baseBal.usdc) : bal && (currentSrc() === 'USDT' ? bal.usdt : bal.usdc);
   if (max === undefined || max === null) return;
   $('amount').value = (Number(max) / 1e6).toString();
   refreshForm();
   saveForm();
 };
-for (const r of document.querySelectorAll('input[name=dir], input[name=mode], input[name=src], input[name=out]')) {
+for (const r of document.querySelectorAll('input[name=dir], input[name=mode], input[name=src], input[name=out], input[name=srcB], input[name=outS]')) {
   r.onchange = () => {
     if (r.name === 'out') preferredOut = r.value;
+    if (r.name === 'outS') preferredOutS = r.value;
     refreshForm();
     saveForm();
   };

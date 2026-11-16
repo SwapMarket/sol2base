@@ -44,6 +44,7 @@
       <div class="row between base-wallet">
         <span id="evmAccount" class="muted">Base wallet: not connected (needed for EURC)</span>
         <button id="connectBase" class="ghost" type="button" title="Rabby, MetaMask, Phantom… — or use WalletConnect above, which connects Base too">Connect Base wallet</button>
+        <button id="disconnectBase" class="ghost" type="button" hidden>Disconnect</button>
       </div>
       <p id="noBaseWallet" class="muted wallet-help" hidden>
         No Base wallet found here. Use <b>WalletConnect</b> above to connect a phone wallet by QR code (e.g. Trust Wallet, which covers
@@ -62,6 +63,12 @@
         <label class="radio"><input type="radio" name="src" value="USDT"> USDT, swapped to USDC first <span class="muted">· Jupiter</span></label>
       </fieldset>
 
+      <fieldset class="src" data-dir="toSol" hidden>
+        <legend>Pay with</legend>
+        <label class="radio"><input type="radio" name="srcB" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="srcB" value="EURC"> EURC, swapped to USDC first <span class="muted">· Aerodrome</span></label>
+      </fieldset>
+
       <label for="amount" id="amountLabel">Amount (USDC)</label>
       <div class="row">
         <input id="amount" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
@@ -73,6 +80,12 @@
         <label class="radio"><input type="radio" name="out" value="USDC" checked> USDC</label>
         <label class="radio"><input type="radio" name="out" value="EURC"> EURC, swapped on Aerodrome <span class="muted" id="eurcHint">· needs a connected Base wallet with a little ETH for gas</span></label>
         <label class="radio topup" id="topUpRow" hidden><input type="checkbox" id="topUp"> Top up gas: swap 0.20 USDC to <span id="topUpEth">ETH</span> on Base, in the same transaction</label>
+      </fieldset>
+
+      <fieldset data-dir="toSol" hidden>
+        <legend>Receive as</legend>
+        <label class="radio"><input type="radio" name="outS" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="outS" value="USDT"> USDT, swapped on Jupiter <span class="muted" id="usdtHint">· needs a connected Solana wallet with a little SOL</span></label>
       </fieldset>
 
       <label for="recipient" id="recipientLabel">Recipient on Base</label>

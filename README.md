@@ -1,6 +1,6 @@
 # sol2base
 
-A static page that moves USDC or USDT from Solana to Base, or USDC from Base to Solana, with Circle's CCTP V2. There's no build step and no backend.
+A static page that moves USDC or USDT from Solana to Base, or USDC or EURC from Base to Solana, with Circle's CCTP V2. There's no build step and no backend.
 
 Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](https://github.com/SwapMarket/eth2base) (Ethereum → Base).
 
@@ -28,12 +28,16 @@ Live at https://swapmarket.github.io/sol2base/ · sister project: [eth2base](htt
 
 1. **Connect** a Base wallet (injected, or the WalletConnect session's Base account). The recipient is the connected Solana
    wallet or any Solana wallet address entered; a token-account address is refused.
+   **Optional, pay with EURC**: the Base wallet first swaps EURC → USDC on Aerodrome Slipstream (0.5% max slippage), then burns
+   the USDC it got.
 2. **Burn** USDC with `TokenMessengerV2.depositForBurnWithHook` on Base (destination domain 5), after a USDC approval and a
    simulation. CCTP mints to a token account, so `mintRecipient` is the recipient's USDC associated token account. The hook is
    Circle's forwarding hook; when that account doesn't exist yet it uses the account-creation variant (`"cctp-forward"`, version 0,
    length 33, `0x01`, the owner's 32-byte key) and the fee comes from `GET /v2/burn/USDC/fees/6/5?forward=true&includeRecipientSetup=true`,
    so **Circle creates the account and mints**: the recipient needs no SOL. Needs a little ETH on Base for the two transactions.
-3. **Track**: `GET /v2/messages/6?transactionHash=<hash>` until `forwardTxHash` (the Solana mint). Standard speed waits for Base
+3. **Track**: `GET /v2/messages/6?transactionHash=<hash>` until `forwardTxHash` (the Solana mint).
+4. **Optional, receive USDT**: the USDC is minted to the connected Solana wallet, which then swaps exactly the minted amount to
+   USDT with Jupiter (checked by simulation, as for USDT → USDC). Needs about 0.003 SOL: network fees, plus a USDT account if missing. Standard speed waits for Base
    finality (about 15–20 minutes); fast takes seconds. Resume accepts the Base transaction hash.
 
 **SOL needed**: about 0.003 SOL, mostly rent for the account where CCTP records the message (reclaimable from Circle's program after
