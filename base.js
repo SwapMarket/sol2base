@@ -64,6 +64,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 export const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
 
+// Send a contract call with the gas limit filled in from our own estimate. Without one the wallet
+// estimates it on its own node, which may not have seen an approval mined seconds earlier: the call
+// then looks like it reverts, and Trust Wallet (over WalletConnect) answers "User disapproved requested
+// methods" even after the user approved. +30% headroom.
+async function write(wallet, params) {
+  const { account, address, abi, functionName, args, value } = params;
+  const gas = await baseClient.estimateContractGas({ account, address, abi, functionName, args, value });
+  return wallet.writeContract({ ...params, gas: (gas * 13n) / 10n });
+}
+
 // ---------- quotes and balances ----------
 
 // Best quote across Aerodrome Slipstream pools: { amountOut, tickSpacing }.
@@ -194,7 +204,7 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
     setStatus(`Confirm the USDC approval for Aerodrome ${inWallet()}…`);
     await sendWatched({
       account, label: 'Approval', setStatus,
-      send: () => wallet.writeContract({ account, address: USDC_BASE, abi: erc20Abi, functionName: 'approve', args: [AERO_ROUTER, amountIn] }),
+      send: () => write(wallet, { account, address: USDC_BASE, abi: erc20Abi, functionName: 'approve', args: [AERO_ROUTER, amountIn] }),
       check: async () => (await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER] })) >= amountIn,
     });
     // Give the wallet's own node time to see the approval: wallets simulate the swap before showing it,
@@ -217,7 +227,7 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
   const r = await sendWatched({
     account, label: 'Swap', setStatus,
     send: () => (eth
-      ? wallet.writeContract({
+      ? write(wallet, {
         account, address: AERO_ROUTER, abi: routerAbi, functionName: 'multicall',
         args: [[
           encodeFunctionData({ abi: routerAbi, functionName: 'exactInputSingle', args: [eurcSwap] }),
@@ -228,7 +238,7 @@ export async function swapToEurc({ signer, amountIn: wanted, to, topUp: withTopU
           encodeFunctionData({ abi: routerAbi, functionName: 'unwrapWETH9', args: [minOut(eth.amountOut), account] }),
         ]],
       })
-      : wallet.writeContract({ account, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle', args: [eurcSwap] })),
+      : write(wallet, { account, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle', args: [eurcSwap] })),
     check: async () => (await baseClient.getLogs({ address: EURC_BASE, event: transferEvent, args: { to }, fromBlock })).at(-1)?.transactionHash,
   });
   const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
@@ -263,7 +273,7 @@ export async function burnUsdc({ signer, amount, destinationDomain, mintRecipien
   const fromBlock = await baseClient.getBlockNumber();
   const r = await sendWatched({
     account, label: 'Burn', setStatus,
-    send: () => wallet.writeContract({ account, address: TOKEN_MESSENGER, abi: tokenMessengerAbi, functionName: 'depositForBurnWithHook', args }),
+    send: () => write(wallet, { account, address: TOKEN_MESSENGER, abi: tokenMessengerAbi, functionName: 'depositForBurnWithHook', args }),
     check: async () => (await baseClient.getLogs({ address: TOKEN_MESSENGER, event: depositForBurnEvent, args: { depositor: account }, fromBlock }))
       .find((l) => l.args.amount === amount)?.transactionHash,
   });
@@ -278,7 +288,7 @@ async function approveIfNeeded({ signer, token, spender, amount, what, setStatus
   setStatus(`Confirm the ${what} ${inWallet()}…`);
   await sendWatched({
     account, label: 'Approval', setStatus,
-    send: () => wallet.writeContract({ account, address: token, abi: erc20Abi, functionName: 'approve', args: [spender, amount] }),
+    send: () => write(wallet, { account, address: token, abi: erc20Abi, functionName: 'approve', args: [spender, amount] }),
     check: async () => (await allowance()) >= amount,
   });
   // Wallets simulate before showing a transaction; one whose node is a block behind says it "will fail".
@@ -304,7 +314,7 @@ export async function swapEurcToUsdc({ signer, amountIn, setStatus, inWallet }) 
   const fromBlock = await baseClient.getBlockNumber();
   const r = await sendWatched({
     account, label: 'Swap', setStatus,
-    send: () => wallet.writeContract({ account, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle', args }),
+    send: () => write(wallet, { account, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle', args }),
     // The swap's EURC leaving the wallet.
     check: async () => (await baseClient.getLogs({ address: EURC_BASE, event: transferEvent, args: { from: account }, fromBlock }))
       .find((l) => l.args.value === amountIn)?.transactionHash,

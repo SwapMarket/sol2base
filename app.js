@@ -67,7 +67,15 @@ const baseTx = B.baseTx;
 const fmtEth = (v) => (Number(v) / 1e18).toLocaleString(undefined, { maximumSignificantDigits: 4 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
-const errMsg = (e) => e?.shortMessage || e?.message || String(e);
+// viem wraps wallet errors it doesn't recognise as "An unknown RPC error occurred."; the wallet's own
+// words are in `details` (e.g. WalletConnect's "User disapproved requested methods").
+const errMsg = (e) => {
+  const short = e?.shortMessage;
+  if (short && e.details && /unknown rpc error/i.test(short)) return e.details;
+  return short || e?.message || String(e);
+};
+// The wallet said no (the user rejected it, or the wallet declined to show it).
+const isRejection = (e) => /disapproved|rejected|denied|declined|cancel/i.test(errMsg(e)) || [4001, 5000, 5002].includes(e?.code ?? e?.cause?.code);
 const currentDir = () => document.querySelector('input[name=dir]:checked').value;
 const currentSrcB = () => document.querySelector('input[name=srcB]:checked').value; // Base → Solana: USDC or EURC
 const currentOutS = () => document.querySelector('input[name=outS]:checked').value; // Base → Solana: USDC or USDT
@@ -1069,7 +1077,10 @@ async function bridgeToSolana() {
     await finishToSol(await track(hash, mode, 'toSol'), mintTo.toBase58(), out, source, dest.toBase58());
   } catch (e) {
     console.error(e);
-    setStatus(explain(e), 'err');
+    // Stopped at the EURC swap: say what's left where.
+    const atSwap = srcB === 'EURC' && !source;
+    const why = isRejection(e) ? `${evm?.name ?? 'The wallet'} declined the ${atSwap ? 'swap' : 'transaction'} (“${errMsg(e)}”).` : explain(e);
+    setStatus(atSwap ? `${why} Nothing was swapped: your EURC is still in the Base wallet${isRejection(e) ? '. If you didn\'t reject it, check the wallet for a warning about the swap, then click Bridge again (the approval is done, so only the swap is asked for)' : ''}.` : why, 'err');
     // Stopped after the EURC swap but before the burn: set the form to bridge that USDC.
     if (unburned) {
       document.querySelector('input[name=srcB][value=USDC]').checked = true;
