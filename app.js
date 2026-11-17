@@ -212,7 +212,15 @@ function tickSteps() {
   }
 }
 setInterval(tickSteps, 1000);
+let progressDir = null; // the direction the progress card belongs to; it's shown only on that tab
 function resetSteps(dir = currentDir()) {
+  progressDir = dir;
+  // Resume can start a transfer of the other direction: switch to its tab.
+  if (dir !== currentDir()) {
+    document.querySelector(`input[name=dir][value=${dir}]`).checked = true;
+    refreshForm();
+    saveForm();
+  }
   for (const li of document.querySelectorAll('#steps li')) {
     li.className = '';
     li.hidden = false;
@@ -867,10 +875,12 @@ async function signAndSend(tx, lastValidBlockHeight, label, extraSigners = []) {
 // For single-signer transactions over WalletConnect: let the wallet sign and send, and watch the chain
 // for the result, since the wallet's reply (the signature) can get lost on the way back. check()
 // returns true once the transaction's effect is visible. Throws if it expires without landing.
+// Resolves to the signature, or null if only the effect was seen.
 async function sendWatched(tx, lastValidBlockHeight, label, check) {
   const slow = setTimeout(() => setStatus(`Still waiting for ${wallet?.name ?? 'the wallet'} to send the ${label.toLowerCase()}. Keep the wallet app open; this page also watches Solana and moves on when it lands.`), 60_000);
   let watching = true;
-  const sent = wallet.signAndSend(tx).then((sig) => { if (watching) setStatus(`${label} sent ${solTx(sig)}, waiting for confirmation…`); return sig; });
+  let signature = null;
+  const sent = wallet.signAndSend(tx).then((sig) => { signature = sig; if (watching) setStatus(`${label} sent ${solTx(sig)}, waiting for confirmation…`); return sig; });
   sent.catch(() => {}); // a rejection still reaches the race below
   const seen = (async () => {
     while (watching) {
@@ -894,6 +904,7 @@ async function sendWatched(tx, lastValidBlockHeight, label, check) {
     watching = false;
     clearTimeout(slow);
   }
+  return signature; // null if the wallet's reply was lost (the effect was seen on chain)
 }
 
 // WalletConnect gives up on a request after 5 minutes without a reply from the wallet.
@@ -907,7 +918,8 @@ function explain(e) {
 // ---------- flow ----------
 
 // Swap with Jupiter from the connected Solana wallet, after checking the swap by simulation; the output
-// goes to `to` (default: the wallet itself). Resolves to the amount of outMint `to` received. Only for
+// goes to `to` (default: the wallet itself). Resolves to { received (outMint `to` got), sig (the swap's
+// signature, if known), createSig (creating `to`'s account, if that was needed) }. Only for
 // USDT ↔ USDC (checked against 1:1).
 async function jupiterSwap(inMint, outMint, amountIn, [inName, outName], to = owner) {
   const other = !to.equals(owner);
@@ -915,14 +927,15 @@ async function jupiterSwap(inMint, outMint, amountIn, [inName, outName], to = ow
   const outNow = async () => tokenAmount((await rpc('getMultipleAccounts', [[outAccount], { encoding: 'base64', commitment: 'confirmed' }])).value[0]) ?? 0n;
   // Jupiter creates the wallet's own output account if needed, but not another wallet's: create it first.
   const exists = async () => !!(await rpc('getMultipleAccounts', [[outAccount], { encoding: 'base64', commitment: 'confirmed' }])).value[0];
+  let createSig = null;
   if (other && !(await exists())) {
     const { value: { blockhash, lastValidBlockHeight } } = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
     const tx = S.buildCreateAtaTx({ payer: owner, owner: to, mint: outMint, blockhash });
     const sim = await rpc('simulateTransaction', [b64(tx.serialize()), { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true }]);
     if (sim.value.err) throw new Error(`Creating the recipient's ${outName} account would fail: ${JSON.stringify(sim.value.err)}`);
     setStatus(`Confirm creating ${short(to.toBase58())}'s ${outName} account (about 0.002 SOL) ${inWallet()}…`);
-    if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Account creation', exists);
-    else await signAndSend(tx, lastValidBlockHeight, 'Account creation');
+    createSig = wallet.signAndSend ? await sendWatched(tx, lastValidBlockHeight, 'Account creation', exists)
+      : await signAndSend(tx, lastValidBlockHeight, 'Account creation');
   }
   setStatus('Getting a Jupiter route…');
   const quote = await S.jupiterQuote(amountIn, SLIPPAGE_BPS, inMint, outMint);
@@ -933,19 +946,25 @@ async function jupiterSwap(inMint, outMint, amountIn, [inName, outName], to = ow
   await S.checkSwapBySimulation(rpc, tx, owner, amountIn, minOut, inMint, outMint, to);
   const before = await outNow();
   setStatus(`Confirm the swap of ${fmt(amountIn)} ${inName} for about ${fmt(BigInt(quote.outAmount))} ${outName}${other ? ` for ${short(to.toBase58())}` : ''} ${inWallet()}…`);
-  if (wallet.signAndSend) await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await outNow()) >= before + minOut);
-  else await signAndSend(tx, lastValidBlockHeight, 'Swap');
+  const sig = wallet.signAndSend ? await sendWatched(tx, lastValidBlockHeight, 'Swap', async () => (await outNow()) >= before + minOut)
+    : await signAndSend(tx, lastValidBlockHeight, 'Swap');
   const received = (await outNow()) - before;
   if (received <= 0n) throw new Error(`The swap delivered no ${outName}`);
-  return received;
+  return { received, sig, createSig };
 }
 
-// Swap USDT → USDC (Solana → Base, paying with USDT). Resolves to the USDC received.
+// " Transactions: burn <link> · Circle mint <link> …" for the steps whose transaction is known.
+function txList(steps) {
+  const known = steps.filter(([, link]) => link).map(([name, link]) => `${name} ${link}`);
+  return known.length ? ` Transactions: ${known.join(' · ')}.` : '';
+}
+
+// Swap USDT → USDC (Solana → Base, paying with USDT). Resolves to { received (USDC), sig }.
 async function swapUsdtToUsdc(amountIn) {
   setStep('swapIn', 'active');
-  const received = await jupiterSwap(S.USDT_MINT, S.USDC_MINT, amountIn, ['USDT', 'USDC']);
+  const r = await jupiterSwap(S.USDT_MINT, S.USDC_MINT, amountIn, ['USDT', 'USDC']);
   setStep('swapIn', 'done');
-  return received;
+  return r;
 }
 
 async function bridge() {
@@ -973,8 +992,8 @@ async function bridge() {
   try {
     // 0. USDT → USDC
     if (src === 'USDT') {
-      const received = await swapUsdtToUsdc(amount);
-      source = { amount };
+      const { received, sig: swapSig } = await swapUsdtToUsdc(amount);
+      source = { amount, sig: swapSig };
       amount = received;
       unburned = received;
       refreshBalances();
@@ -1003,7 +1022,7 @@ async function bridge() {
     setStep('burn', 'done');
     refreshBalances();
 
-    await finish(await track(sig, mode), source, out, eurcTo, topUp);
+    await finish(await track(sig, mode), source, out, eurcTo, topUp, sig);
   } catch (e) {
     console.error(e);
     setStatus(explain(e), 'err');
@@ -1074,7 +1093,7 @@ async function bridgeToSolana() {
     savePending({ sig: hash, dir: 'toSol', to: mintTo.toBase58(), usdtTo: dest.toBase58(), out });
     setStep('burn', 'done');
     refreshBaseBalances();
-    await finishToSol(await track(hash, mode, 'toSol'), mintTo.toBase58(), out, source, dest.toBase58());
+    await finishToSol(await track(hash, mode, 'toSol'), mintTo.toBase58(), out, source, dest.toBase58(), hash);
   } catch (e) {
     console.error(e);
     // Stopped at the EURC swap: say what's left where.
@@ -1093,7 +1112,7 @@ async function bridgeToSolana() {
 }
 
 // `to`: the wallet the USDC was minted to; `usdtTo`: the USDT recipient (default: `to`).
-async function finishToSol(m, to, out = 'USDC', source = null, usdtTo = to) {
+async function finishToSol(m, to, out = 'USDC', source = null, usdtTo = to, burnHash = null) {
   // A USDT transfer stays saved (for Resume after a reload) until its swap is done.
   if (out !== 'USDT') clearPending();
   refreshBalances();
@@ -1108,12 +1127,26 @@ async function finishToSol(m, to, out = 'USDC', source = null, usdtTo = to) {
   const burned = BigInt(body.amount);
   const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
   const minted = burned - fee;
-  const account = new S.PublicKey(Uint8Array.from(body.mintRecipient.replace(/^0x/, '').match(/../g), (h) => parseInt(h, 16))).toBase58();
+  // Iris gives a Solana mint recipient (the USDC token account) in base58.
+  const account = /^0x/.test(body.mintRecipient)
+    ? new S.PublicKey(Uint8Array.from(body.mintRecipient.slice(2).match(/../g), (h) => parseInt(h, 16))).toBase58()
+    : body.mintRecipient;
+  if (!to) { // resumed without this browser's record: name the account's owner
+    try {
+      to = (await rpc('getAccountInfo', [account, { encoding: 'jsonParsed', commitment: 'confirmed' }])).value?.data?.parsed?.info?.owner ?? null;
+      if (usdtTo === undefined || usdtTo === null) usdtTo = to;
+    } catch (e) { console.warn('token account owner', e); }
+  }
   const forWhom = to ? `for ${short(to)}` : `in USDC account ${short(account)}`;
   const sent = source ? `${fmt(source.amount)} EURC` : `${fmt(burned)} USDC`;
-  const before = source ? `EURC → ${fmt(burned)} USDC via Aerodrome ${baseTx(source.hash)}, ` : '';
+  const before = source ? `EURC → ${fmt(burned)} USDC via Aerodrome, ` : '';
+  const txs = [
+    ['Aerodrome swap', source?.hash && baseTx(source.hash)],
+    ['burn', burnHash && baseTx(burnHash)],
+    ['Circle mint', link],
+  ];
   if (out !== 'USDT') {
-    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Solana ${forWhom} ${link}${rateNote(source?.amount, minted)}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.`, 'ok');
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Solana ${forWhom}${rateNote(source?.amount, minted)}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.${txList(txs)}`, 'ok');
     return;
   }
   if (!to) {
@@ -1121,7 +1154,7 @@ async function finishToSol(m, to, out = 'USDC', source = null, usdtTo = to) {
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  pendingUsdt = { amountIn: minted, owner: to, to: usdtTo ?? to, sent, before, fee, eurcIn: source?.amount ?? null };
+  pendingUsdt = { amountIn: minted, owner: to, to: usdtTo ?? to, sent, before, fee, eurcIn: source?.amount ?? null, txs };
   setStatus(`${fmt(minted)} USDC minted on Solana ${link}. Now swapping to USDT…`);
   await swapToUsdt();
 }
@@ -1134,13 +1167,14 @@ async function swapToUsdt() {
   setStep('swap', 'active');
   try {
     if (!owner || owner.toBase58() !== p.owner) throw new Error(`The USDC went to ${short(p.owner)}. Connect that Solana wallet to swap.`);
-    const usdt = await jupiterSwap(S.USDC_MINT, S.USDT_MINT, p.amountIn, ['USDC', 'USDT'], new S.PublicKey(p.to));
+    const { received: usdt, sig, createSig } = await jupiterSwap(S.USDC_MINT, S.USDT_MINT, p.amountIn, ['USDC', 'USDT'], new S.PublicKey(p.to));
     setStep('swap', 'done');
     pendingUsdt = null;
     clearPending();
     solInfo.clear();
     const forWhom = p.to === p.owner ? '' : ` for ${short(p.to)}`;
-    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana${forWhom}${rateNote(p.eurcIn, usdt)}. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.`, 'ok');
+    const txs = [...p.txs, ['USDT account', createSig && solTx(createSig)], ['Jupiter swap', sig && solTx(sig)]];
+    setStatus(`Done! ${p.sent} → ${fmt(usdt)} USDT on Solana${forWhom}${rateNote(p.eurcIn, usdt)}. Fees: ${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Jupiter swap.${txList(txs)}`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
@@ -1162,7 +1196,7 @@ async function resume() {
     document.querySelector('#steps li[data-step="swap"]').hidden = out !== 'USDT';
     setStep('burn', 'done');
     try {
-      await finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null, out, null, same ? saved.usdtTo : undefined);
+      await finishToSol(await track(sig, null, 'toSol'), same ? saved.to : null, out, null, same ? saved.usdtTo : undefined, sig);
     } catch (e) {
       console.error(e);
       setStatus(errMsg(e), 'err');
@@ -1174,7 +1208,7 @@ async function resume() {
   resetSteps('toBase');
   setStep('burn', 'done');
   try {
-    await finish(await track(sig), null, same ? saved.out : currentOut(), same ? saved.eurcTo : recipient(), same ? saved.topUp : topUpOn());
+    await finish(await track(sig), null, same ? saved.out : currentOut(), same ? saved.eurcTo : recipient(), same ? saved.topUp : topUpOn(), sig);
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -1214,7 +1248,7 @@ async function track(sig, mode, dir = 'toBase') {
   }
 }
 
-async function finish(m, source = null, out = 'USDC', eurcTo = null, topUp = false) {
+async function finish(m, source = null, out = 'USDC', eurcTo = null, topUp = false, burnSig = null) {
   // An EURC transfer stays saved (for Resume after a reload) until its swap is done.
   if (out !== 'EURC') clearPending();
   refreshBalances();
@@ -1232,12 +1266,17 @@ async function finish(m, source = null, out = 'USDC', eurcTo = null, topUp = fal
   const sent = source ? `${fmt(source.amount)} USDT` : `${fmt(burned)} USDC`;
   const before = source ? `USDT → ${fmt(burned)} USDC via Jupiter, ` : '';
   const rent = `The ${fmtSol(LAMPORTS.eventRent)} SOL message-account rent can be reclaimed after 5 days.`;
+  const txs = [
+    ['Jupiter swap', source?.sig && solTx(source.sig)],
+    ['burn', burnSig && solTx(burnSig)],
+    ['Circle mint', link],
+  ];
   if (out !== 'EURC') {
-    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Base for ${short(to)} ${link}. Fees: ${before}Circle's fee ${fmt(fee)} USDC. ${rent}`, 'ok');
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Base for ${short(to)}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.${txList(txs)} ${rent}`, 'ok');
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  pendingSwap = { signer: to, amountIn: minted, to: eurcTo ?? to, topUp, sent, sentAmount: source?.amount ?? burned, before, fee, rent };
+  pendingSwap = { signer: to, amountIn: minted, to: eurcTo ?? to, topUp, sent, sentAmount: source?.amount ?? burned, before, fee, rent, txs };
   setStatus(`${fmt(minted)} USDC minted on Base ${link}. Now swapping to EURC…`);
   await swapToEurc();
 }
@@ -1259,7 +1298,7 @@ async function swapToEurc() {
     const gasDone = r.ethOut ? `, plus ${fmtEth(r.ethOut)} ETH for gas from ${fmt(r.topUp)} USDC` : '';
     // The rate is only end-to-end if the whole delivered amount was swapped; it leaves out the gas top-up.
     setStatus(r.amountIn === p.amountIn
-      ? `Done! ${p.sent} → ${fmt(r.eurcOut)} EURC${dest}${gasDone}. Effective EUR/USD ${eurUsd(p.sentAmount - r.topUp, r.eurcOut)}, all fees included (${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Aerodrome swap ${baseTx(r.hash)}). ${p.rent}`
+      ? `Done! ${p.sent} → ${fmt(r.eurcOut)} EURC${dest}${gasDone}. Effective EUR/USD ${eurUsd(p.sentAmount - r.topUp, r.eurcOut)}, all fees included (${p.before}Circle's fee ${fmt(p.fee)} USDC, then the Aerodrome swap).${txList([...p.txs, ['Aerodrome swap', baseTx(r.hash)]])} ${p.rent}`
       : `Done! Swapped ${fmt(r.amountIn)} USDC to ${fmt(r.eurcOut)} EURC${dest}${gasDone} on Aerodrome ${baseTx(r.hash)}.`, 'ok');
     refreshBaseBalances();
   } catch (e) {
@@ -1476,6 +1515,7 @@ for (const r of document.querySelectorAll('input[name=dir], input[name=mode], in
   r.onchange = () => {
     if (r.name === 'out') preferredOut = r.value;
     if (r.name === 'outS') preferredOutS = r.value;
+    if (r.name === 'dir' && progressDir) $('progress').hidden = r.value !== progressDir;
     refreshForm();
     saveForm();
   };
