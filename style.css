@@ -37,9 +37,16 @@ main { max-width: 520px; margin: 0 auto; padding: 32px 16px; }
 header { text-align: center; }
 h1 {
   margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
   font-size: clamp(1.9rem, 6vw, 2.6rem);
   line-height: 1.15;
   font-weight: 800;
+}
+h1 .tether { flex: none; width: 1.1em; height: 1.1em; }
+h1 span {
   background: linear-gradient(90deg, #eac806, #2084f6);
   -webkit-background-clip: text;
   background-clip: text;
