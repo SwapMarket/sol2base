@@ -1,141 +1,165 @@
+/* Styles borrowed from liq2sol (github.com/SwapMarket/liq2sol, client/site/style.css), in the style of
+   swapmarket.github.io: deep navy, dark cards with a soft glow, dashed fields, and a yellow call to action. */
 :root {
-  --bg: #f6f7f9;
-  --card: #fff;
-  --text: #14171f;
-  --muted: #6b7280;
-  --border: #e3e6eb;
-  --accent: #0052ff;
-  --ok: #138a4b;
-  --err: #c0262d;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1015;
-    --card: #171a21;
-    --text: #e8eaef;
-    --muted: #8b93a3;
-    --border: #2a2f3a;
-    --accent: #4d84ff;
-    --ok: #3ccf7f;
-    --err: #ff6b70;
-    color-scheme: dark;
-  }
+  --bg: #142840;
+  --card: #0f1f30;
+  --deep: #091625;
+  --edge: #1e2d3c;
+  --border: rgb(255 255 255 / 10%);
+  --text: #d7dee4;
+  --muted: #a1a9b2;
+  --dim: #727e8c;
+  --primary: #e8cb2b;
+  --primary-soft: rgb(232 203 43 / 35%);
+  --link: #4fadc2;
+  --ok: #4fc04f;
+  --ok-bg: #0f3a1c;
+  --warn-bg: #3d3210;
+  --warn-text: #f6e7a8;
+  --err: #ff8a80;
+  --err-bg: #4a1414;
+  --radius: 16px;
+  color-scheme: dark;
+  accent-color: var(--primary);
 }
 
 * { box-sizing: border-box; }
+html, body { min-height: 100%; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 15px/1.5 "Noto Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-main { max-width: 520px; margin: 0 auto; padding: 40px 16px; }
-h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
-.sub { margin: 6px 0 24px; color: var(--muted); }
-.sub { margin-bottom: 14px; }
-.dir { display: flex; margin: 0 0 20px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
-.dir label { flex: 1; margin: 0; text-align: center; padding: 9px 8px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--muted); }
-.dir label:has(input:checked) { background: var(--accent); color: #fff; }
-.dir label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -4px; }
+a { color: var(--link); }
+main { max-width: 520px; margin: 0 auto; padding: 32px 16px; }
+header { text-align: center; }
+h1 {
+  margin: 0;
+  font-size: clamp(1.9rem, 6vw, 2.6rem);
+  line-height: 1.15;
+  font-weight: 800;
+  background: linear-gradient(90deg, #eac806, #2084f6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.sub { margin: 8px 0 16px; color: var(--muted); font-size: 14px; }
+
+/* Direction switch */
+.dir { display: flex; margin: 0 0 20px; border: 1px dashed var(--dim); border-radius: 12px; overflow: hidden; background: var(--deep); }
+.dir label { flex: 1; margin: 0; text-align: center; padding: 9px 8px; cursor: pointer; font-weight: 700; font-size: 14px; color: var(--muted); }
+.dir label:hover { color: var(--primary); }
+.dir label:has(input:checked) { background: var(--primary); color: var(--card); }
+.dir label:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: -4px; }
 .dir input { position: absolute; opacity: 0; pointer-events: none; }
 
 .card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px;
-  margin-bottom: 14px;
+  border-radius: var(--radius);
+  box-shadow: 0 0 34px var(--primary-soft);
+  padding: 16px;
+  margin-bottom: 20px;
 }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .row.between { justify-content: space-between; }
 #balances { margin-top: 12px; font-size: 14px; }
 .bal { display: grid; grid-template-columns: 72px 1fr; padding: 4px 0; }
-.bal .chain { color: var(--muted); }
+.bal .chain { color: var(--dim); }
 .bal .vals { display: flex; flex-wrap: wrap; gap: 2px 16px; }
 .muted { color: var(--muted); }
 
-label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
+label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 12px 0 6px 4px; }
 label:first-child { margin-top: 0; }
 input[type=text] {
   flex: 1;
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
+  border: 1px dashed var(--dim);
+  border-radius: 12px;
+  background: var(--deep);
   color: var(--text);
   font: inherit;
+  outline: 0;
 }
+input[type=text]::placeholder { color: var(--dim); }
 .row input[type=text] { width: auto; }
-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+input[type=text]:focus { border-color: var(--primary); }
+#amount { font-size: 1.35rem; }
 
 fieldset { border: 0; padding: 0; margin: 14px 0 0; }
 fieldset.src { margin: 0 0 4px; }
-label.topup { margin-left: 26px; color: var(--muted); }
+legend { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 6px 4px; padding: 0; }
+label.radio { display: block; padding-left: 26px; text-indent: -26px; font-weight: 400; font-size: 14px; color: var(--text); margin: 6px 0 6px 4px; }
+label.radio input { margin: 0 8px 0 0; vertical-align: -2px; }
 label.radio:has(input:disabled) { opacity: 0.55; }
-legend { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-label.radio { font-weight: 400; font-size: 14px; margin: 4px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+label.topup { margin-left: 26px; color: var(--muted); }
 
-button {
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--card);
+/* Buttons: quiet (outlined) by default, yellow for the main action. */
+button, a.btn {
+  display: inline-block;
+  padding: 9px 14px;
+  border: 1px solid var(--dim);
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--text);
   font: inherit;
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-a.btn {
-  display: inline-block;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--text);
-  font-weight: 600;
-  text-decoration: none;
+button:hover:not(:disabled), a.btn:hover { background: var(--edge); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+button.primary, a.btn.primary {
+  border: 0;
+  background: var(--primary);
+  color: var(--card);
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 14px;
 }
-a.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { width: 100%; margin-top: 18px; padding: 11px 12px; }
+button.primary:hover:not(:disabled), a.btn.primary:hover { background: #fee86b; }
+button.primary:disabled { opacity: 1; background: #545c65; color: var(--edge); }
+button.ghost { background: transparent; }
 .wc-mobile { margin-top: 12px; }
 .wc-mobile p { margin: 0 0 10px; font-size: 14px; }
-button.primary {
-  width: 100%;
-  margin-top: 18px;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-button.ghost { background: transparent; }
 
-#steps { margin: 0; padding-left: 22px; }
-#steps li { margin: 4px 0; color: var(--muted); }
+/* Progress */
+#steps { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+#steps li { position: relative; padding: 3px 0 3px 24px; color: var(--dim); }
+#steps li::before { content: "○"; position: absolute; left: 4px; }
 #steps li.active { color: var(--text); font-weight: 600; }
-#steps li.done { color: var(--ok); }
-#steps li.done::after { content: " ✓"; }
+#steps li.active::before { content: "●"; color: var(--primary); }
+#steps li.done { color: var(--muted); }
+#steps li.done::before { content: "✓"; color: var(--ok); }
+#steps li.skipped { color: var(--dim); text-decoration: line-through; }
+#steps li.skipped::before { content: "–"; }
 #steps .elapsed { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
-#steps li.skipped { color: var(--muted); text-decoration: line-through; }
-.status { margin-top: 12px; font-size: 14px; word-break: break-word; }
-.status.err { color: var(--err); }
-.status.ok { color: var(--ok); }
-.status a { color: var(--accent); }
+#steps li.active .elapsed { color: var(--primary); }
+.status { margin-top: 12px; font-size: 14px; overflow-wrap: anywhere; }
+.status.ok { padding: 10px 12px; border-radius: 10px; background: var(--ok-bg); color: #d3f5d3; }
+.status.err { padding: 10px 12px; border-radius: 10px; background: var(--err-bg); color: #ffd9d4; }
 #manualMint, #retrySwap { margin-top: 12px; }
-.base-wallet { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-#baseBalances { margin-top: 8px; font-size: 14px; }
-.sweep { margin-top: 8px; }
-.receive { margin: 14px 0 0; font-size: 14px; font-weight: 600; }
-.receive:empty { display: none; }
-.warn { margin: 8px 0 0; font-size: 14px; color: var(--err); }
-.warn:empty { display: none; }
 
-summary { cursor: pointer; font-weight: 600; }
-details p { margin: 10px 0; font-size: 14px; }
-footer { font-size: 12px; margin-top: 20px; }
-footer a { color: var(--accent); }
-code { font-size: 12px; }
-.rent { margin-top: 6px; font-size: 14px; }
-.hint { margin: 6px 0 0; font-size: 13px; }
+/* The outcome, in liq2sol's dashed "to" row; warnings as tinted boxes. */
+.receive { margin: 14px 0 0; padding: 10px 12px; border: 1px dashed rgb(232 203 43 / 60%); border-radius: 12px; background: var(--deep); font-size: 14px; font-weight: 600; }
+.receive:empty { display: none; }
+.warn { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; background: var(--warn-bg); color: var(--warn-text); font-size: 14px; }
+.warn:empty { display: none; }
+.hint { margin: 6px 0 0 4px; font-size: 13px; }
 .hint:empty { display: none; }
+.sweep { margin-top: 8px; }
+
+summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+summary:hover { color: var(--primary); }
+details p { margin: 10px 0; font-size: 14px; }
+footer { text-align: center; color: var(--dim); font-size: 12px; margin-top: 20px; }
+code { font: 12px ui-monospace, "Noto Mono", Menlo, monospace; }
+
+/* sol2base: the Base wallet section and the rent line. */
+.base-wallet { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--edge); }
+#baseBalances { margin-top: 8px; font-size: 14px; }
+.rent { margin-top: 6px; font-size: 14px; }
