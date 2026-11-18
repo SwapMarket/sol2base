@@ -41,7 +41,8 @@ h1 {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  font-size: clamp(1.9rem, 6vw, 2.6rem);
+  font-size: clamp(1.3rem, 7.5vw, 2.4rem);
+  white-space: nowrap;
   line-height: 1.15;
   font-weight: 800;
 }
