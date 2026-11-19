@@ -69,6 +69,18 @@ re-sent until confirmed or expired.
 To run it locally: `./build.sh`, then serve `_site/` (e.g. `python3 -m http.server -d _site`). The repo files alone don't run,
 since the libraries only exist after the build.
 
+## Check the live page
+
+Anyone can check that the published page is exactly what its source builds:
+
+```sh
+./check-page.sh                     # https://swapmarket.github.io/sol2base/
+./check-page.sh https://1cdzwdkc0uepk5ll8mhpcbyw3xh8gakldbfdq8fphhqnv503bcsol2base.nsite.lol/   # the copy on Nostr
+```
+
+It reads the commit from the page's footer, rebuilds that commit with its own `build.sh`, and compares every file with what the
+site serves, byte for byte. It needs git and curl, and Node with npm, since the build bundles the libraries, and this repository with that commit fetched (it fetches if needed).
+
 ## Addresses
 
 | | |
