@@ -21,6 +21,8 @@ for (const a of document.querySelectorAll('a[data-site]')) a.href = siteUrl(a.da
 const NSITE_GATEWAY = 'nwb.tf';
 const nsiteUrl = (name, gateway = NSITE_GATEWAY) => `https://${name ? KEY36 + name : NPUB}.${gateway}/`;
 for (const a of document.querySelectorAll('a[data-nsite]')) a.href = nsiteUrl(a.dataset.nsite);
+// Already on one of SwapMarket's nsites (the same test as siteUrl's), the page needs no link to its copy on Nostr.
+if (siteUrl('') !== 'https://swapmarket.github.io/') for (const note of document.querySelectorAll('[data-nsite-note]')) note.hidden = true;
 
 // The menu: on narrow screens the burger opens it over the page, and choosing a page closes it.
 {
