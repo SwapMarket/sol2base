@@ -2,6 +2,21 @@ import { isAddress, getAddress } from 'viem';
 import * as S from 'solana';
 import * as B from 'base';
 
+// SwapMarket's sites are on GitHub Pages, and also nsites (NIP-5A) under SwapMarket's key, each its own subdomain on a gateway:
+// <key in base36><name>.<gateway>, or <npub>.<gateway> for the root site, BTC Swaps. A menu link opened on one of those stays on the
+// same gateway; anywhere else, including a copy under another key, it goes to GitHub Pages. As liq2sol's client/site/js/sites.js,
+// which has the tests.
+const KEY36 = '1cdzwdkc0uepk5ll8mhpcbyw3xh8gakldbfdq8fphhqnv503bc';
+const NPUB = 'npub1xhklzztd83v34zsf9da2gvfrctj5wcsvsx09er9v26jy7r0uq8yq4vme7d';
+function siteUrl(name, hostname = location.hostname) {
+  const [label, ...gateway] = hostname.split('.');
+  if (gateway.length && (label === NPUB || (label.startsWith(KEY36) && /^[a-z0-9-]{1,13}$/.test(label.slice(KEY36.length))))) {
+    return `https://${name ? KEY36 + name : NPUB}.${gateway.join('.')}/`;
+  }
+  return `https://swapmarket.github.io/${name ? `${name}/` : ''}`;
+}
+for (const a of document.querySelectorAll('a[data-site]')) a.href = siteUrl(a.dataset.site);
+
 // The menu: on narrow screens the burger opens it over the page, and choosing a page closes it.
 {
   const burger = document.getElementById('burger');
