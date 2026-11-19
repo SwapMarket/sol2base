@@ -16,6 +16,11 @@ function siteUrl(name, hostname = location.hostname) {
   return `https://swapmarket.github.io/${name ? `${name}/` : ''}`;
 }
 for (const a of document.querySelectorAll('a[data-site]')) a.href = siteUrl(a.dataset.site);
+// The gateway the footer links to for the copy on Nostr (as NSITE_GATEWAY in liq2sol's client/site/js/sites.js): nsite.lol never
+// picked up a later manifest of a site it had served, while nwb.tf showed each within minutes (2026-11-19).
+const NSITE_GATEWAY = 'nwb.tf';
+const nsiteUrl = (name, gateway = NSITE_GATEWAY) => `https://${name ? KEY36 + name : NPUB}.${gateway}/`;
+for (const a of document.querySelectorAll('a[data-nsite]')) a.href = nsiteUrl(a.dataset.nsite);
 
 // The menu: on narrow screens the burger opens it over the page, and choosing a page closes it.
 {
