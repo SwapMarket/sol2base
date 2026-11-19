@@ -172,3 +172,29 @@ code { font: 12px ui-monospace, "Noto Mono", Menlo, monospace; }
 .base-wallet { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--edge); }
 #baseBalances { margin-top: 8px; font-size: 14px; }
 .rent { margin-top: 6px; font-size: 14px; }
+
+/* The menu, as in liq2sol (client/site/style.css): the site's logo on the left, then SwapMarket's other pages. */
+nav { background: var(--card); border-bottom: 1px solid rgb(255 255 255 / 8%); }
+.nav-inner { max-width: 960px; margin: 0 auto; padding: 8px 16px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; justify-content: center; }
+.logo { display: inline-flex; align-items: center; margin-right: 28px; }
+.logo img { display: block; height: 28px; width: auto; }
+.tab { color: var(--text); text-decoration: none; padding: 2px 14px; border-left: 1px solid rgb(255 255 255 / 15%); }
+#collapse { display: flex; align-items: center; flex-wrap: wrap; }
+.tab:hover, .tab.on { color: var(--primary); }
+@media (max-width: 500px) { .logo { margin-right: 12px; } }
+
+/* The burger and its menu, from SwapMarket/swapmarket.github.io src/style/nav.scss (AGPL-3.0), with this page's colours. */
+#burger { display: none; background: none; border: 0; padding: 0; margin-left: auto; position: relative; z-index: 1000;
+  cursor: pointer; -webkit-tap-highlight-color: transparent; transition: transform 400ms; user-select: none; }
+#burger.active { transform: rotate(45deg); }
+body.menu-open { overflow: hidden; }
+#burger .line { fill: none; transition: stroke-dasharray 400ms, stroke-dashoffset 400ms; stroke: var(--text); stroke-width: 5.5; stroke-linecap: round; }
+#burger .top, #burger .bottom { stroke-dasharray: 40 121; }
+#burger.active .top, #burger.active .bottom { stroke-dashoffset: -68px; }
+@media (max-width: 768px) {
+  .nav-inner { justify-content: flex-start; }
+  #burger { display: block; }
+  #collapse { display: none; }
+  #collapse.open { display: flex; position: fixed; z-index: 999; inset: 0; background: var(--bg); align-items: center; justify-content: center; flex-direction: column; }
+  #collapse.open .tab { display: block; border-left: 0; padding: 6px 24px; font-size: 26px; }
+}

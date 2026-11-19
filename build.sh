@@ -8,7 +8,7 @@ sha=${1:-dev}
 
 rm -rf _site
 mkdir -p _site/vendor
-cp index.html app.js solana.js base.js style.css icon.png sw.js _site/
+cp index.html app.js solana.js base.js style.css icon.png logo.svg sw.js _site/
 
 # Libraries: exactly what package-lock.json records (npm checks each package's hash); no install scripts.
 npm ci --ignore-scripts --no-audit --no-fund

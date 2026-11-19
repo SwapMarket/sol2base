@@ -2,6 +2,20 @@ import { isAddress, getAddress } from 'viem';
 import * as S from 'solana';
 import * as B from 'base';
 
+// The menu: on narrow screens the burger opens it over the page, and choosing a page closes it.
+{
+  const burger = document.getElementById('burger');
+  const menu = document.getElementById('collapse');
+  const set = (open) => {
+    menu.classList.toggle('open', open);
+    burger.classList.toggle('active', open);
+    document.body.classList.toggle('menu-open', open);
+    burger.setAttribute('aria-expanded', String(open));
+  };
+  burger.addEventListener('click', () => set(!menu.classList.contains('open')));
+  menu.addEventListener('click', (e) => { if (e.target.closest('a')) set(false); });
+}
+
 const IRIS = 'https://iris-api.circle.com';
 const FINALITY = { fast: 1000, standard: 2000 };
 const SLIPPAGE_BPS = 50; // 0.5%

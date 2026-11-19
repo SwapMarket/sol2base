@@ -77,3 +77,7 @@ since the libraries only exist after the build.
 | MessageTransmitterV2 (Solana) | `CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC` |
 | USDC / USDT (Solana) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` / `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB` |
 | USDC (Base) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+
+## Licence
+
+AGPL-3.0-only (`LICENSE`). The menu, its burger and much of the styling come from SwapMarket/swapmarket.github.io and liq2sol's client, which are AGPL-3.0.
