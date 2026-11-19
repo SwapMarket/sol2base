@@ -178,7 +178,7 @@ nav { background: var(--card); border-bottom: 1px solid rgb(255 255 255 / 8%); }
 .nav-inner { max-width: 960px; margin: 0 auto; padding: 8px 16px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; justify-content: center; }
 .logo { display: inline-flex; align-items: center; margin-right: 28px; }
 .logo img { display: block; height: 28px; width: auto; }
-.tab { color: var(--text); text-decoration: none; padding: 2px 14px; border-left: 1px solid rgb(255 255 255 / 15%); }
+.tab { color: var(--text); text-decoration: none; font-size: 16px; padding: 2px 14px; border-left: 1px solid rgb(255 255 255 / 15%); }
 #collapse { display: flex; align-items: center; flex-wrap: wrap; }
 .tab:hover, .tab.on { color: var(--primary); }
 @media (max-width: 500px) { .logo { margin-right: 12px; } }
