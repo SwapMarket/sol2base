@@ -670,21 +670,28 @@ function base58Decode(s) {
 }
 
 // A phone wallet over WalletConnect: QR code on desktop, wallet list or link on phones.
+// One client for the page. Each SignClient.init starts its own WalletConnect core on the same storage and relay, so with two (one
+// restoring the last session at load, one connecting) a wallet's answer could reach the one that hadn't asked, which drops it ("No
+// matching key"), and the page waits on a signature already given. The start is kept, so calls that overlap share it.
 let wcClient = null;
-async function wcInit() {
-  if (wcClient) return wcClient;
-  const { SignClient } = await import('@walletconnect/sign-client');
-  wcClient = await SignClient.init({
-    projectId: WALLETCONNECT_PROJECT_ID,
-    // The page's own URL (not just the origin, which is a different site with its own favicon), so wallets
-    // that look up the site's icon find this one.
-    metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: new URL('.', location.href).href, icons: [new URL('icon.png', location.href).href] },
-  });
-  wcClient.on('session_delete', () => {
-    try { localStorage.removeItem(WC_KEY); } catch {}
-    setOwner(null);
-    setEvm(null);
-  });
+function wcInit() {
+  wcClient ??= (async () => {
+    const { SignClient } = await import('@walletconnect/sign-client');
+    const client = await SignClient.init({
+      projectId: WALLETCONNECT_PROJECT_ID,
+      // The page's own URL (not just the origin, which is a different site with its own favicon), so wallets
+      // that look up the site's icon find this one.
+      metadata: { name: 'sol2base', description: 'Bridge USDT/USDC from Solana to Base with CCTP', url: new URL('.', location.href).href, icons: [new URL('icon.png', location.href).href] },
+    });
+    client.on('session_delete', () => {
+      try { localStorage.removeItem(WC_KEY); } catch {}
+      setOwner(null);
+      setEvm(null);
+    });
+    return client;
+  })();
+  // A failed start, such as the relay being unreachable, can be tried again.
+  wcClient.catch(() => { wcClient = null; });
   return wcClient;
 }
 
