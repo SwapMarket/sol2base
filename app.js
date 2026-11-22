@@ -707,8 +707,7 @@ async function restoreWalletConnect() {
 }
 
 async function connectWalletConnect() {
-  const [client, { WalletConnectModal }] = await Promise.all([wcInit(), import('@walletconnect/modal')]);
-  const modal = new WalletConnectModal({ projectId: WALLETCONNECT_PROJECT_ID, chains: [WC_SOLANA] });
+  const [client, { walletConnectDialog }] = await Promise.all([wcInit(), import('qr')]);
   const { uri, approval } = await client.connect({
     requiredNamespaces: { solana: { chains: [WC_SOLANA], methods: ['solana_signTransaction'], events: [] } },
     optionalNamespaces: {
@@ -718,12 +717,13 @@ async function connectWalletConnect() {
       eip155: { chains: ['eip155:8453'], methods: ['eth_sendTransaction'], events: ['accountsChanged', 'chainChanged'] },
     },
   });
-  if (uri) modal.openModal({ uri });
+  // Our own dialog rather than WalletConnect's modal, so the code can fill the screen (qr.js). Closing it ends the attempt.
+  const dialog = uri ? walletConnectDialog(uri, 'Scan with your Solana wallet') : null;
   let session;
   try {
-    session = await approval();
+    session = await (dialog ? Promise.race([approval(), dialog.closed]) : approval());
   } finally {
-    modal.closeModal();
+    dialog?.close();
   }
   useWalletConnectSession(client, session);
 }
@@ -1520,7 +1520,7 @@ function loadSaved() {
 
 $('connect').onclick = () => (owner ? disconnectSolana() : connect().catch((e) => alert(errMsg(e))));
 $('disconnectBase').onclick = disconnectBase;
-$('connectQr').onclick = () => connectWalletConnect().catch((e) => alert(errMsg(e)));
+$('connectQr').onclick = () => connectWalletConnect().catch((e) => e?.closedByUser || alert(errMsg(e)));
 $('connectBase').onclick = () => connectBase().catch((e) => alert(errMsg(e)));
 $('retrySwap').onclick = () => (pendingUsdt ? swapToUsdt() : swapToEurc());
 $('sweep').onclick = sweep;

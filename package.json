@@ -4,8 +4,8 @@
   "description": "Libraries bundled into vendor/ at deploy time (see build.sh); versions pinned, hashes in package-lock.json.",
   "dependencies": {
     "@solana/web3.js": "1.95.8",
-    "@walletconnect/modal": "2.7.0",
     "@walletconnect/sign-client": "2.17.2",
+    "qrcode-generator": "1.5.2",
     "viem": "2.21.55"
   },
   "devDependencies": {

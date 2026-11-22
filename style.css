@@ -198,3 +198,15 @@ body.menu-open { overflow: hidden; }
   #collapse.open { display: flex; position: fixed; z-index: 999; inset: 0; background: var(--bg); align-items: center; justify-content: center; flex-direction: column; }
   #collapse.open .tab { display: block; border-left: 0; padding: 6px 24px; font-size: 26px; }
 }
+
+/* The WalletConnect QR dialog (qr.js), and its code filling the screen on a tap, as in liq2sol. */
+.wc-dialog { max-width: min(92vw, 380px); padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--text); text-align: center; }
+.wc-dialog::backdrop { background: rgb(0 0 0 / 60%); }
+.wc-dialog h3 { margin: 0 0 10px; font-size: 1.05rem; }
+.wc-dialog .row { justify-content: center; gap: 8px; margin-top: 12px; }
+.wc-dialog .open-wc { display: block; margin-top: 12px; }
+.wc-dialog .muted { font-size: .85rem; margin: 8px 0 0; }
+.qr { display: flex; justify-content: center; cursor: zoom-in; }
+.qr svg { width: 220px; height: 220px; background: #fff; border-radius: 10px; padding: 6px; }
+.qr-full { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; background: #000; cursor: zoom-out; }
+.qr-full > svg { box-sizing: border-box; width: min(94vw, 94vh); height: min(94vw, 94vh); padding: min(3vw, 3vh); background: #fff; }
